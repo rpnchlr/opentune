@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""Run OpenTune from a source checkout.
+
+After installation, use the `opentune` command directly instead.
+"""
+
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from opentune.__main__ import main
+
+raise SystemExit(main())

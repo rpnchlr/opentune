@@ -19,6 +19,36 @@ from typing import Any
 SEARCH_LIMIT = 12
 MIX_LIMIT = 10
 
+HELP_TEXT = """\
+OpenTune — stream YouTube music from your terminal
+
+Usage:
+  opentune [MUSIC ...]
+
+Examples:
+  opentune Daft Punk Get Lucky
+  opentune
+
+Options:
+  -h, --help     Show this help and exit.
+
+Player keys:
+  j / Down       Select next result or queue track
+  k / Up         Select previous result or queue track
+  Enter          Play the selected track
+  Space          Pause or resume
+  h / l          Previous / next track
+  H / L          Rewind / forward 10 seconds
+  Ctrl-l         Toggle looping for the current track
+  Tab            Switch between Results and Queue
+  /              Search YouTube from inside OpenTune
+  ?              Toggle this key reference in the TUI
+  q / Esc        Quit OpenTune
+
+OpenTune requires mpv and yt-dlp. It streams audio only and does not
+download tracks. Selecting a result creates a short related mix, shown
+in the Queue tab."""
+
 
 @dataclass(frozen=True)
 class Track:
@@ -222,6 +252,7 @@ class TUI:
         self.queue_index = 0
         self.tab = 0  # 0 results, 1 queue
         self.running = True
+        self.showing_help = False
         curses.curs_set(0)
         screen.nodelay(True)
         screen.keypad(True)
@@ -290,7 +321,9 @@ class TUI:
         tabs += "     " + ("[ Queue ]" if self.tab == 1 else "  Queue  ")
         self.screen.addnstr(6, 2, tabs, width - 4, curses.A_BOLD)
         list_height = max(1, height - 10)
-        if self.tab == 0:
+        if self.showing_help:
+            self.draw_help(8, width, list_height)
+        elif self.tab == 0:
             self.draw_track_list(self.results, self.result_index, 8, list_height, width)
         else:
             self.draw_track_list(self.player.queue, self.queue_index, 8, list_height, width)
@@ -298,6 +331,21 @@ class TUI:
         status = self.clipped(self.player.message, width - 4)
         self.screen.addnstr(height - 1, 2, status, width - 4, curses.A_DIM)
         self.screen.refresh()
+
+    def draw_help(self, top: int, width: int, height: int) -> None:
+        lines = [
+            "KEY REFERENCE  (press ? or Esc to return)",
+            "",
+            "j / ↓    down       k / ↑    up        Enter    play selection",
+            "Space    pause/play h        previous  l        next",
+            "H        rewind 10s L        forward 10s Ctrl-l   toggle loop",
+            "Tab      Results/Queue       /        search     q        quit",
+            "",
+            "Selecting a result starts playback and prepares a related mix in Queue.",
+        ]
+        for index, line in enumerate(lines[:height]):
+            attr = curses.A_BOLD if index == 0 else curses.A_NORMAL
+            self.screen.addnstr(top + index, 2, self.clipped(line, width - 4), width - 4, attr)
 
     def move(self, delta: int) -> None:
         if self.tab == 0:
@@ -315,6 +363,10 @@ class TUI:
             self.player.start(track, build_mix=False)
 
     def handle(self, key: int) -> None:
+        if self.showing_help:
+            if key in (ord("?"), 27, ord("q")):
+                self.showing_help = False
+            return
         if key in (ord("q"), 27):
             self.running = False
         elif key in (ord("j"), curses.KEY_DOWN):
@@ -339,6 +391,8 @@ class TUI:
             self.player.toggle_loop()
         elif key == ord("/"):
             self.prompt_search()
+        elif key == ord("?"):
+            self.showing_help = True
 
     def run(self) -> None:
         while self.running:
@@ -350,7 +404,12 @@ class TUI:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="A terminal YouTube music player")
+    parser = argparse.ArgumentParser(
+        prog="opentune",
+        description="A Vim-keyed terminal music player for YouTube audio streams.",
+        epilog=HELP_TEXT,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("query", nargs="*", help="Search query to open on launch")
     args = parser.parse_args()
     missing = require_tools()
