@@ -48,4 +48,4 @@ The first release is the point at which PyPI creates the project and converts th
 
 ## License
 
-Choose and add a license file before the public release. A license is a legal decision and is intentionally not selected automatically by this setup.
+OpenTune is distributed under Apache License 2.0. The root `LICENSE` file contains the full license text, and `NOTICE` contains the project attribution notice. PyPI metadata declares the SPDX expression `Apache-2.0` and includes the license file in distribution archives.

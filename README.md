@@ -257,3 +257,9 @@ opentune/
 ## Current scope and limitations
 
 OpenTune v1 is a streaming player. It does not yet provide persistent playlists, saved favorites, downloads, lyrics, volume controls, or system media-key integration. These are good candidates for later releases, but the current goal is fast terminal search and playback with a lightweight mix queue.
+
+## License
+
+Copyright 2026 Rudraksh.
+
+OpenTune is licensed under the [Apache License 2.0](LICENSE). It includes an explicit patent grant; see [NOTICE](NOTICE) for the project attribution notice.
