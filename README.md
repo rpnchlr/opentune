@@ -120,6 +120,17 @@ While the environment is active, `opentune` works normally. After `deactivate`, 
 
 Do not use `--break-system-packages`; it bypasses Arch's protection for the system Python and is unnecessary for OpenTune.
 
+### Install from PyPI
+
+After OpenTune's first PyPI release, installation and future upgrades will work from any directory:
+
+```sh
+pipx install opentune
+pipx upgrade opentune
+```
+
+Maintainers can follow [the PyPI release guide](docs/PYPI_RELEASE.md) to configure Trusted Publishing and publish releases.
+
 ### Run without installing
 
 For development or a one-off run from this checkout:

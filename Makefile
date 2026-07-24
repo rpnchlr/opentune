@@ -1,4 +1,4 @@
-.PHONY: install upgrade test
+.PHONY: install upgrade test build
 
 install:
 	pipx install .
@@ -8,3 +8,6 @@ upgrade:
 
 test:
 	python3 -m unittest discover -s tests -v
+
+build:
+	python3 -m build
