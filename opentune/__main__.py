@@ -11,9 +11,13 @@ import sys
 import tempfile
 import threading
 import time
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
+
+from . import __version__
 
 
 SEARCH_LIMIT = 12
@@ -78,15 +82,13 @@ class YouTube:
     """Small, deliberately dependency-free yt-dlp adapter."""
 
     @staticmethod
-    def search(query: str, limit: int = SEARCH_LIMIT) -> list[Track]:
-        if not query.strip():
-            return []
-        command = ["yt-dlp", "--flat-playlist", "--dump-single-json", f"ytsearch{limit}:{query}"]
+    def _fetch(target: str, label: str) -> list[Track]:
+        command = ["yt-dlp", "--flat-playlist", "--dump-single-json", target]
         try:
             completed = subprocess.run(command, capture_output=True, text=True, timeout=25, check=True)
             payload = json.loads(completed.stdout)
         except (subprocess.SubprocessError, json.JSONDecodeError) as error:
-            raise RuntimeError(f"Search failed: {error}") from error
+            raise RuntimeError(f"{label} failed: {error}") from error
         tracks: list[Track] = []
         for entry in payload.get("entries") or []:
             video_id = entry.get("id")
@@ -101,12 +103,70 @@ class YouTube:
         return tracks
 
     @classmethod
+    def search(cls, query: str, limit: int = SEARCH_LIMIT) -> list[Track]:
+        if not query.strip():
+            return []
+        return cls._fetch(f"ytsearch{limit}:{query}", "Search")
+
+    @staticmethod
+    def _video_id(url: str) -> str | None:
+        parsed = urlparse(url)
+        if parsed.netloc in {"youtu.be", "www.youtu.be"}:
+            return parsed.path.strip("/") or None
+        video_id = parse_qs(parsed.query).get("v", [None])[0]
+        return video_id
+
+    @staticmethod
+    def _track_key(track: Track) -> str:
+        """Create a loose song identity to exclude alternate uploads of a seed."""
+        title = track.title.lower()
+        if track.uploader:
+            title = title.replace(track.uploader.lower(), " ")
+        title = re.sub(r"\[[^]]*\]|\([^)]*\)", " ", title)
+        title = re.sub(
+            r"\b(official|audio|video|lyrics?|visuali[sz]er|music|hd|4k|remaster(?:ed)?)\b",
+            " ",
+            title,
+        )
+        return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", title)).strip()
+
+    @classmethod
+    def _unique_mix(cls, seed: Track, candidates: list[Track]) -> list[Track]:
+        seed_key = cls._track_key(seed)
+        seen: set[str] = set()
+        mix: list[Track] = []
+        for candidate in candidates:
+            key = cls._track_key(candidate)
+            same_song = bool(seed_key and (key == seed_key or key.startswith(seed_key + " ") or seed_key.startswith(key + " ")))
+            if not key or candidate.url == seed.url or same_song or key in seen:
+                continue
+            seen.add(key)
+            mix.append(candidate)
+            if len(mix) == MIX_LIMIT:
+                break
+        return mix
+
+    @classmethod
     def mix_for(cls, track: Track) -> list[Track]:
-        # This intentionally stays a search-derived mix: predictable, quick, and works
-        # without scraping private YouTube recommendation endpoints.
-        seed = f"{track.uploader} {track.title}".strip()
-        candidates = cls.search(seed, MIX_LIMIT + 4)
-        return [candidate for candidate in candidates if candidate.url != track.url][:MIX_LIMIT]
+        # YouTube's RD playlist is the same radio/mix mechanism exposed by its UI.
+        # It produces a varied sequence rather than search matches of the same video.
+        video_id = cls._video_id(track.url)
+        if video_id:
+            try:
+                radio = cls._fetch(
+                    f"https://www.youtube.com/watch?v={video_id}&list=RD{video_id}",
+                    "YouTube mix",
+                )
+                mix = cls._unique_mix(track, radio)
+                if mix:
+                    return mix
+            except RuntimeError:
+                pass
+
+        # Fallback when YouTube does not expose a radio playlist for a video.
+        artist = track.uploader or track.title
+        candidates = cls.search(f"{artist} songs", MIX_LIMIT * 3)
+        return cls._unique_mix(track, candidates)
 
 
 class MPV:
@@ -274,6 +334,9 @@ class TUI:
         height, _ = self.screen.getmaxyx()
         self.screen.nodelay(False)
         curses.curs_set(1)
+        # curses.wrapper() enables noecho for the TUI. Turn echo on only for this
+        # text field so a query is visible as the user types it.
+        curses.echo()
         self.screen.move(height - 1, 0)
         self.screen.clrtoeol()
         self.screen.addstr(height - 1, 0, "Search: ")
@@ -281,6 +344,8 @@ class TUI:
             query = self.screen.getstr(height - 1, 8).decode().strip()
         except KeyboardInterrupt:
             query = ""
+        finally:
+            curses.noecho()
         curses.curs_set(0)
         self.screen.nodelay(True)
         if query:
@@ -410,6 +475,7 @@ def main() -> int:
         epilog=HELP_TEXT,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("query", nargs="*", help="Search query to open on launch")
     args = parser.parse_args()
     missing = require_tools()

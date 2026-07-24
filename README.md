@@ -22,7 +22,7 @@ OpenTune coordinates two established command-line programs:
 2. OpenTune shows those results in its terminal UI.
 3. When a track is selected, `mpv` opens the YouTube URL and streams the best available audio format.
 4. OpenTune controls `mpv` through a private local socket, so pause, seek, loop, and progress updates work while the TUI remains open.
-5. In the background, OpenTune searches again using the selected track's title/channel to create a short related queue.
+5. In the background, OpenTune asks YouTube for its radio/mix playlist seeded by the selected video, then filters alternate uploads of the same song before filling the queue. If YouTube does not expose a radio playlist, OpenTune falls back to other songs from the selected artist.
 
 Nothing is downloaded or uploaded by OpenTune. Search, stream playback, and mix generation need an active internet connection.
 
@@ -75,6 +75,28 @@ opentune --help
 ```
 
 If `opentune` is not found immediately after `pipx ensurepath`, restart the shell. `pipx` normally adds `~/.local/bin` to your `PATH`.
+
+### Updating an installation from this checkout
+
+`pipx upgrade opentune` checks the package's published source (usually PyPI). It cannot detect edits made only in this local Git checkout, even if the local version number changes. To install the current checkout after pulling or editing code, run this from the project directory:
+
+```sh
+pipx install --force .
+```
+
+Or use the included shortcut:
+
+```sh
+make upgrade
+```
+
+Confirm the installed release with:
+
+```sh
+opentune --version
+```
+
+OpenTune follows semantic versioning: patch releases (for example `0.2.0` → `0.2.1`) contain fixes, while minor releases add backwards-compatible features.
 
 ### Alternative: project virtual environment
 
@@ -168,7 +190,7 @@ The Results tab contains the latest YouTube search. Each row shows its title, ch
 
 ### Queue tab
 
-Selecting a search result starts a short related mix. The Queue tab shows the tracks waiting to play. You can:
+Selecting a search result starts a short YouTube radio-style mix. OpenTune filters duplicate uploads and alternate versions of the selected song, so the queue should contain different songs rather than the same title from several channels. The Queue tab shows the tracks waiting to play. You can:
 
 - Press `l` to start the next queued track.
 - Highlight a queued track and press `Enter` to jump directly to it.
@@ -217,6 +239,7 @@ opentune/
 ├── bin/opentune          # launcher for running from this checkout
 ├── opentune/__main__.py  # CLI, terminal UI, search, queue, and mpv control
 ├── tests/                # small automated checks
+├── Makefile               # install, local pipx upgrade, and test shortcuts
 └── pyproject.toml        # package metadata and installed `opentune` command
 ```
 
