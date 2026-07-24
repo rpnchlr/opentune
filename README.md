@@ -51,26 +51,52 @@ If YouTube changes its site, updating `yt-dlp` is usually the first thing to try
 
 ## Installation
 
-Clone or enter this project, then install it for your user:
+On current Arch Linux, do **not** use `pip install --user` for this project. Arch marks its system Python as externally managed (PEP 668), so `pip` correctly refuses to modify it. Choose one of the following isolated installation methods.
+
+### Recommended: install the CLI with pipx
+
+`pipx` installs Python applications into their own virtual environments while exposing their commands on your `PATH`. This is the best option when you want to run `opentune` from any directory.
+
+```sh
+# Install pipx once on Arch Linux
+sudo pacman -S python-pipx
+pipx ensurepath
+
+# Open a new terminal, then install this checkout
+cd /path/to/opentune
+pipx install .
+```
+
+Afterward, use it like any other command:
+
+```sh
+opentune "Daft Punk Get Lucky"
+opentune --help
+```
+
+If `opentune` is not found immediately after `pipx ensurepath`, restart the shell. `pipx` normally adds `~/.local/bin` to your `PATH`.
+
+### Alternative: project virtual environment
+
+Use this when developing OpenTune or when you only need the command from this checkout:
 
 ```sh
 cd /path/to/opentune
-python3 -m pip install --user .
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install .
+opentune "Daft Punk Get Lucky"
 ```
 
-`--user` means “install only for my current Linux user.” It avoids `sudo` and does not modify the system Python installation. The `opentune` executable is normally installed at `~/.local/bin/opentune`.
+Important: omit `--user` inside a virtual environment. The virtual environment already isolates the installation, and Python intentionally hides user site-packages from it.
 
-If your shell cannot find the command afterward, add that directory to your `PATH`:
+While the environment is active, `opentune` works normally. After `deactivate`, either activate it again or run the executable explicitly:
 
 ```sh
-export PATH="$HOME/.local/bin:$PATH"
+.venv/bin/opentune "Daft Punk Get Lucky"
 ```
 
-For zsh, make that permanent by adding the same line to `~/.zshrc`, then open a new terminal or run:
-
-```sh
-source ~/.zshrc
-```
+Do not use `--break-system-packages`; it bypasses Arch's protection for the system Python and is unnecessary for OpenTune.
 
 ### Run without installing
 
