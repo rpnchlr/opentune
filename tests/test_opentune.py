@@ -1,7 +1,8 @@
+import io
 import unittest
 from unittest.mock import patch
 
-from opentune.__main__ import Track, YouTube, format_time
+from opentune.__main__ import MPV, Track, YouTube, format_time
 
 
 class OpenTuneTests(unittest.TestCase):
@@ -49,3 +50,22 @@ class OpenTuneTests(unittest.TestCase):
         self.assertEqual(player.clear_queue(), 1)
         self.assertEqual(player.queue, [])
         player.close()
+
+    def test_failed_mpv_does_not_advance_queue(self):
+        class FakeProcess:
+            returncode = 1
+            stderr = io.StringIO("network error")
+
+            def wait(self):
+                return self.returncode
+
+        mpv = MPV.__new__(MPV)
+        errors = []
+        finished = []
+        mpv._intentional_stop = False
+        mpv.process = process = FakeProcess()
+        mpv._on_finished = lambda: finished.append(True)
+        mpv._on_error = lambda message: errors.append(message)
+        mpv._watch(process)
+        self.assertEqual(finished, [])
+        self.assertEqual(errors, ["network error"])

@@ -201,8 +201,9 @@ class YouTube:
 class MPV:
     """Controls one headless mpv instance over its JSON IPC socket."""
 
-    def __init__(self, on_finished: callable) -> None:
+    def __init__(self, on_finished: callable, on_error: callable) -> None:
         self._on_finished = on_finished
+        self._on_error = on_error
         self._directory = tempfile.TemporaryDirectory(prefix="opentune-")
         self.socket_path = str(Path(self._directory.name) / "mpv.sock")
         self.process: subprocess.Popen[str] | None = None
@@ -218,13 +219,20 @@ class MPV:
         ]
         if loop:
             command.insert(-1, "--loop-file=inf")
-        self.process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
+        self.process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         threading.Thread(target=self._watch, args=(self.process,), daemon=True).start()
 
     def _watch(self, process: subprocess.Popen[str]) -> None:
-        process.wait()
-        if not self._intentional_stop and process is self.process:
-            self._on_finished()
+        return_code = process.wait()
+        error_text = (process.stderr.read().strip() if process.stderr else "")
+        is_current = process is self.process
+        if is_current:
+            self.process = None
+        if not self._intentional_stop and is_current:
+            if return_code == 0:
+                self._on_finished()
+            else:
+                self._on_error(error_text or f"mpv exited with status {return_code}")
 
     def command(self, command: list[Any]) -> Any | None:
         if not self.process or self.process.poll() is not None:
@@ -278,14 +286,16 @@ class Player:
         self.history: list[Track] = []
         self.loop = False
         self.message = "Ready. Press / to search."
+        self.playback_failed = False
         self._lock = threading.Lock()
-        self.mpv = MPV(self._finished)
+        self.mpv = MPV(self._finished, self._playback_error)
 
     def start(self, track: Track, *, build_mix: bool = True, remember_current: bool = True) -> None:
         with self._lock:
             if remember_current and self.current and self.current.url != track.url:
                 self.history.append(self.current)
             self.current = track
+            self.playback_failed = False
             self.mpv.play(track, self.loop)
             self.message = f"Playing: {track.title}"
         if build_mix:
@@ -309,6 +319,12 @@ class Player:
                     self.message = f"Mix ready: {len(self.queue)} tracks queued"
         except RuntimeError:
             pass
+
+    def _playback_error(self, detail: str) -> None:
+        with self._lock:
+            self.playback_failed = True
+            compact = " ".join(detail.split())
+            self.message = f"Playback failed: {compact[-220:]}"
 
     def next(self) -> None:
         with self._lock:
@@ -456,7 +472,7 @@ class TUI:
         position, paused = self.player.mpv.state() if current else (0, False)
         title = current.title if current else "Nothing playing"
         duration = current.duration if current else 0
-        mode = "PAUSED" if paused else "PLAYING" if current else "IDLE"
+        mode = "ERROR" if current and self.player.playback_failed else "PAUSED" if paused else "PLAYING" if current else "IDLE"
         loop = " LOOP" if self.player.loop else ""
         self.screen.addnstr(0, 1, f" OPENTUNE  ·  {mode}{loop}", width - 2, curses.A_BOLD)
         self.screen.hline(1, 0, curses.ACS_HLINE, width)
