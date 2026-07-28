@@ -172,7 +172,7 @@ opentune --help
 3. Move with `j`/`k` or `↓`/`↑`.
 4. Press `Enter` to start the highlighted result.
 5. The title and time appear at the top of the screen.
-6. OpenTune prepares related tracks in the background. Press `Tab` to view them in the **Queue** tab.
+6. OpenTune prepares a YouTube radio-style mix in the background. Press `Tab` to view it in the **Queue** tab.
 7. Press `q` or `Esc` to quit.
 
 ## Keybinds
@@ -190,8 +190,12 @@ opentune --help
 | `Ctrl+l` | Toggle looping of the current track |
 | `Tab` | Switch between **Results** and **Queue** |
 | `/` | Open a search prompt |
+| `a` | Append the selected search result to the Queue without playing it |
+| `d` | Delete the selected track from the Queue |
+| `c` | Clear the Queue |
 | `?` | Open/close the in-player key reference |
-| `q` or `Esc` | Quit OpenTune (or close the `?` help overlay) |
+| `Esc` in search | Cancel search and keep the current results |
+| `q` or `Esc` outside search | Quit OpenTune (or close the `?` help overlay) |
 
 ## Results, playback, and the queue
 
@@ -201,10 +205,12 @@ The Results tab contains the latest YouTube search. Each row shows its title, ch
 
 ### Queue tab
 
-Selecting a search result starts a short YouTube radio-style mix. OpenTune filters duplicate uploads and alternate versions of the selected song, so the queue should contain different songs rather than the same title from several channels. The Queue tab shows the tracks waiting to play. You can:
+Selecting a search result starts a YouTube radio-style mix. OpenTune filters duplicate uploads, alternate versions of the selected song, and obvious non-music results, so the queue should contain different music tracks rather than the same title from several channels. The Queue tab shows the tracks waiting to play. You can:
 
 - Press `l` to start the next queued track.
 - Highlight a queued track and press `Enter` to jump directly to it.
+- Press `a` on a search result to append it without interrupting playback.
+- Press `d` to remove the highlighted queue item, or `c` to clear the whole queue.
 - Use `Tab` to return to Results.
 
 The queue is kept in memory for the current session only. It is cleared when OpenTune exits.

@@ -22,6 +22,12 @@ from . import __version__
 
 SEARCH_LIMIT = 12
 MIX_LIMIT = 10
+NON_MUSIC_TERMS = re.compile(
+    r"\b(?:podcast|interview|reaction|review|news|tutorial|gameplay|walkthrough|"
+    r"vlog|documentary|trailer|short film|comedy|stand[- ]?up|webinar|lecture|"
+    r"how to|unboxing|behind the scenes)\b",
+    re.IGNORECASE,
+)
 
 HELP_TEXT = """\
 OpenTune — stream YouTube music from your terminal
@@ -46,12 +52,16 @@ Player keys:
   Ctrl-l         Toggle looping for the current track
   Tab            Switch between Results and Queue
   /              Search YouTube from inside OpenTune
+  a              Append the selected search result to the Queue
+  d              Delete the selected track from the Queue
+  c              Clear the Queue
   ?              Toggle this key reference in the TUI
   q / Esc        Quit OpenTune
 
 OpenTune requires mpv and yt-dlp. It streams audio only and does not
-download tracks. Selecting a result creates a short related mix, shown
-in the Queue tab."""
+download tracks. Selecting a result creates a YouTube radio-style mix,
+shown in the Queue tab. Only music-like results are kept; use `a` to append
+a search result without starting it."""
 
 
 @dataclass(frozen=True)
@@ -82,6 +92,23 @@ class YouTube:
     """Small, deliberately dependency-free yt-dlp adapter."""
 
     @staticmethod
+    def _looks_like_music(entry: dict[str, Any]) -> bool:
+        title = str(entry.get("title") or "")
+        if not title or NON_MUSIC_TERMS.search(title):
+            return False
+        if entry.get("is_live") or entry.get("live_status") in {"is_live", "is_upcoming"}:
+            return False
+        duration = entry.get("duration")
+        if duration is not None and (float(duration) < 30 or float(duration) > 2 * 60 * 60):
+            return False
+        categories = entry.get("categories") or []
+        if categories and "music" not in " ".join(str(item) for item in categories).lower():
+            # yt-dlp often omits categories for flat search results. When it
+            # supplies them, do not accept a known non-music category.
+            return False
+        return True
+
+    @staticmethod
     def _fetch(target: str, label: str) -> list[Track]:
         command = ["yt-dlp", "--flat-playlist", "--dump-single-json", target]
         try:
@@ -92,7 +119,7 @@ class YouTube:
         tracks: list[Track] = []
         for entry in payload.get("entries") or []:
             video_id = entry.get("id")
-            if not video_id:
+            if not video_id or not YouTube._looks_like_music(entry):
                 continue
             tracks.append(Track(
                 title=entry.get("title") or "Untitled",
@@ -106,7 +133,7 @@ class YouTube:
     def search(cls, query: str, limit: int = SEARCH_LIMIT) -> list[Track]:
         if not query.strip():
             return []
-        return cls._fetch(f"ytsearch{limit}:{query}", "Search")
+        return cls._fetch(f"ytsearch{limit}:{query} music", "Search")
 
     @staticmethod
     def _video_id(url: str) -> str | None:
@@ -164,6 +191,8 @@ class YouTube:
                 pass
 
         # Fallback when YouTube does not expose a radio playlist for a video.
+        # This remains artist-scoped and passes through the same music filter;
+        # it is not a second search for the seed title.
         artist = track.uploader or track.title
         candidates = cls.search(f"{artist} songs", MIX_LIMIT * 3)
         return cls._unique_mix(track, candidates)
@@ -268,7 +297,15 @@ class Player:
             with self._lock:
                 if self.current == track:
                     existing = {item.url for item in self.queue}
-                    self.queue.extend(item for item in mix if item.url not in existing)
+                    existing_keys = {YouTube._track_key(item) for item in self.queue}
+                    for item in mix:
+                        key = YouTube._track_key(item)
+                        if item.url in existing or (key and key in existing_keys):
+                            continue
+                        self.queue.append(item)
+                        existing.add(item.url)
+                        if key:
+                            existing_keys.add(key)
                     self.message = f"Mix ready: {len(self.queue)} tracks queued"
         except RuntimeError:
             pass
@@ -280,6 +317,33 @@ class Player:
                 return
             next_track = self.queue.pop(0)
         self.start(next_track, build_mix=False)
+
+    def enqueue(self, track: Track) -> bool:
+        with self._lock:
+            existing_urls = {item.url for item in self.queue}
+            existing_keys = {YouTube._track_key(item) for item in self.queue}
+            key = YouTube._track_key(track)
+            if track.url in existing_urls or (key and key in existing_keys):
+                self.message = "That track is already in the Queue"
+                return False
+            self.queue.append(track)
+            self.message = f"Added to Queue: {track.title}"
+            return True
+
+    def remove_queue_at(self, index: int) -> Track | None:
+        with self._lock:
+            if not 0 <= index < len(self.queue):
+                return None
+            removed = self.queue.pop(index)
+            self.message = f"Removed from Queue: {removed.title}"
+            return removed
+
+    def clear_queue(self) -> int:
+        with self._lock:
+            count = len(self.queue)
+            self.queue.clear()
+            self.message = "Queue cleared" if count else "Queue is already empty"
+            return count
 
     def previous(self) -> None:
         with self._lock:
@@ -334,21 +398,38 @@ class TUI:
         height, _ = self.screen.getmaxyx()
         self.screen.nodelay(False)
         curses.curs_set(1)
-        # curses.wrapper() enables noecho for the TUI. Turn echo on only for this
-        # text field so a query is visible as the user types it.
-        curses.echo()
-        self.screen.move(height - 1, 0)
-        self.screen.clrtoeol()
-        self.screen.addstr(height - 1, 0, "Search: ")
+        query_chars: list[str] = []
+        cancelled = False
         try:
-            query = self.screen.getstr(height - 1, 8).decode().strip()
-        except KeyboardInterrupt:
-            query = ""
+            while True:
+                query_text = "".join(query_chars)
+                display_width = max(1, self.screen.getmaxyx()[1] - 10)
+                visible = query_text[-display_width:]
+                self.screen.move(height - 1, 0)
+                self.screen.clrtoeol()
+                self.screen.addnstr(height - 1, 0, f"Search: {visible}", self.screen.getmaxyx()[1] - 1)
+                self.screen.refresh()
+                key = self.screen.getch()
+                if key in (27, 3):  # Esc/Ctrl-c cancels without changing results.
+                    cancelled = True
+                    break
+                if key in (10, 13, curses.KEY_ENTER):
+                    break
+                if key in (curses.KEY_BACKSPACE, 8, 127):
+                    if query_chars:
+                        query_chars.pop()
+                elif 32 <= key <= 126:
+                    query_chars.append(chr(key))
         finally:
-            curses.noecho()
+            self.screen.move(height - 1, 0)
+            self.screen.clrtoeol()
+            self.screen.refresh()
         curses.curs_set(0)
         self.screen.nodelay(True)
-        if query:
+        query = "".join(query_chars).strip()
+        if cancelled:
+            self.player.message = "Search cancelled"
+        elif query:
             self.search(query)
 
     @staticmethod
@@ -404,9 +485,11 @@ class TUI:
             "j / ↓    down       k / ↑    up        Enter    play selection",
             "Space    pause/play h        previous  l        next",
             "H        rewind 10s L        forward 10s Ctrl-l   toggle loop",
-            "Tab      Results/Queue       /        search     q        quit",
+            "Tab      Results/Queue       /        search     a        add to Queue",
+            "d        delete from Queue  c        clear Queue ?        this help",
+            "Esc      cancel search (in prompt)       q        quit",
             "",
-            "Selecting a result starts playback and prepares a related mix in Queue.",
+            "Selecting a result starts playback and prepares a YouTube radio mix.",
         ]
         for index, line in enumerate(lines[:height]):
             attr = curses.A_BOLD if index == 0 else curses.A_NORMAL
@@ -426,6 +509,19 @@ class TUI:
                 track = self.player.queue.pop(self.queue_index)
             self.queue_index = max(0, min(self.queue_index, len(self.player.queue) - 1))
             self.player.start(track, build_mix=False)
+
+    def append_selected(self) -> None:
+        if self.tab == 0 and self.results:
+            self.player.enqueue(self.results[self.result_index])
+        else:
+            self.player.message = "Select a search result to append"
+
+    def delete_selected(self) -> None:
+        if self.tab != 1:
+            self.player.message = "Switch to Queue to delete a track"
+            return
+        self.player.remove_queue_at(self.queue_index)
+        self.queue_index = max(0, min(self.queue_index, len(self.player.queue) - 1))
 
     def handle(self, key: int) -> None:
         if self.showing_help:
@@ -456,6 +552,13 @@ class TUI:
             self.player.toggle_loop()
         elif key == ord("/"):
             self.prompt_search()
+        elif key == ord("a"):
+            self.append_selected()
+        elif key == ord("d"):
+            self.delete_selected()
+        elif key == ord("c"):
+            self.player.clear_queue()
+            self.queue_index = 0
         elif key == ord("?"):
             self.showing_help = True
 
