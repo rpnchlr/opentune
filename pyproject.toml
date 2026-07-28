@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opentune"
-version = "0.3.1"
+version = "0.4.0"
 description = "A Vim-keyed terminal music player for YouTube audio streams"
 readme = "README.md"
 requires-python = ">=3.10"

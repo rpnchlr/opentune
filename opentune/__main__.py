@@ -55,8 +55,10 @@ Player keys:
   a              Append the selected search result to the Queue
   d              Delete the selected track from the Queue
   c              Clear the Queue
+  u              Undo the last queue delete/clear
+  Ctrl-r         Redo the last undone queue delete/clear
   ?              Toggle this key reference in the TUI
-  q / Esc        Quit OpenTune
+  q / Esc        Quit (Esc cancels an active search prompt)
 
 OpenTune requires mpv and yt-dlp. It streams audio only and does not
 download tracks. Selecting a result creates a YouTube radio-style mix,
@@ -279,6 +281,14 @@ class MPV:
         self._directory.cleanup()
 
 
+@dataclass(frozen=True)
+class QueueAction:
+    kind: str
+    index: int = 0
+    track: Track | None = None
+    tracks: tuple[Track, ...] = ()
+
+
 class Player:
     def __init__(self) -> None:
         self.current: Track | None = None
@@ -287,6 +297,8 @@ class Player:
         self.loop = False
         self.message = "Ready. Press / to search."
         self.playback_failed = False
+        self._queue_undo: list[QueueAction] = []
+        self._queue_redo: list[QueueAction] = []
         self._lock = threading.Lock()
         self.mpv = MPV(self._finished, self._playback_error)
 
@@ -316,6 +328,8 @@ class Player:
                         existing.add(item.url)
                         if key:
                             existing_keys.add(key)
+                    if mix:
+                        self._queue_redo.clear()
                     self.message = f"Mix ready: {len(self.queue)} tracks queued"
         except RuntimeError:
             pass
@@ -332,6 +346,7 @@ class Player:
                 self.message = "Queue is empty"
                 return
             next_track = self.queue.pop(0)
+            self._queue_redo.clear()
         self.start(next_track, build_mix=False)
 
     def enqueue(self, track: Track) -> bool:
@@ -343,6 +358,7 @@ class Player:
                 self.message = "That track is already in the Queue"
                 return False
             self.queue.append(track)
+            self._queue_redo.clear()
             self.message = f"Added to Queue: {track.title}"
             return True
 
@@ -351,15 +367,65 @@ class Player:
             if not 0 <= index < len(self.queue):
                 return None
             removed = self.queue.pop(index)
+            self._queue_undo.append(QueueAction("delete", index=index, track=removed))
+            self._queue_redo.clear()
             self.message = f"Removed from Queue: {removed.title}"
             return removed
 
     def clear_queue(self) -> int:
         with self._lock:
             count = len(self.queue)
+            if count:
+                self._queue_undo.append(QueueAction("clear", tracks=tuple(self.queue)))
+                self._queue_redo.clear()
             self.queue.clear()
             self.message = "Queue cleared" if count else "Queue is already empty"
             return count
+
+    def take_queue_at(self, index: int) -> Track | None:
+        """Take a queue item to play without treating playback as undoable."""
+        with self._lock:
+            if not 0 <= index < len(self.queue):
+                return None
+            self._queue_redo.clear()
+            return self.queue.pop(index)
+
+    def undo_queue_action(self) -> bool:
+        with self._lock:
+            if not self._queue_undo:
+                self.message = "Nothing to undo"
+                return False
+            action = self._queue_undo.pop()
+            if action.kind == "delete" and action.track is not None:
+                self.queue.insert(min(action.index, len(self.queue)), action.track)
+                self.message = f"Undo: restored {action.track.title}"
+            elif action.kind == "clear":
+                self.queue[0:0] = list(action.tracks)
+                self.message = f"Undo: restored {len(action.tracks)} queue tracks"
+            self._queue_redo.append(action)
+            return True
+
+    def redo_queue_action(self) -> bool:
+        with self._lock:
+            if not self._queue_redo:
+                self.message = "Nothing to redo"
+                return False
+            action = self._queue_redo.pop()
+            if action.kind == "delete" and action.track is not None:
+                index = action.index if action.index < len(self.queue) else -1
+                if index >= 0 and self.queue[index].url == action.track.url:
+                    self.queue.pop(index)
+                else:
+                    for candidate_index, candidate in enumerate(self.queue):
+                        if candidate.url == action.track.url:
+                            self.queue.pop(candidate_index)
+                            break
+                self.message = f"Redo: removed {action.track.title}"
+            elif action.kind == "clear":
+                self.queue.clear()
+                self.message = "Redo: cleared Queue"
+            self._queue_undo.append(action)
+            return True
 
     def previous(self) -> None:
         with self._lock:
@@ -369,6 +435,7 @@ class Player:
             previous_track = self.history.pop()
             if self.current:
                 self.queue.insert(0, self.current)
+                self._queue_redo.clear()
         self.start(previous_track, build_mix=False, remember_current=False)
 
     def _finished(self) -> None:
@@ -502,8 +569,9 @@ class TUI:
             "Space    pause/play h        previous  l        next",
             "H        rewind 10s L        forward 10s Ctrl-l   toggle loop",
             "Tab      Results/Queue       /        search     a        add to Queue",
-            "d        delete from Queue  c        clear Queue ?        this help",
-            "Esc      cancel search (in prompt)       q        quit",
+            "d        delete from Queue  c        clear Queue u        undo",
+            "Ctrl-r   redo               ?        this help    q        quit",
+            "Esc      cancel search (in prompt)",
             "",
             "Selecting a result starts playback and prepares a YouTube radio mix.",
         ]
@@ -521,8 +589,9 @@ class TUI:
         if self.tab == 0 and self.results:
             self.player.start(self.results[self.result_index])
         elif self.tab == 1 and self.player.queue:
-            with self.player._lock:
-                track = self.player.queue.pop(self.queue_index)
+            track = self.player.take_queue_at(self.queue_index)
+            if track is None:
+                return
             self.queue_index = max(0, min(self.queue_index, len(self.player.queue) - 1))
             self.player.start(track, build_mix=False)
 
@@ -575,6 +644,12 @@ class TUI:
         elif key == ord("c"):
             self.player.clear_queue()
             self.queue_index = 0
+        elif key == ord("u"):
+            self.player.undo_queue_action()
+            self.queue_index = max(0, min(self.queue_index, len(self.player.queue) - 1))
+        elif key == 18:  # Ctrl-r
+            self.player.redo_queue_action()
+            self.queue_index = max(0, min(self.queue_index, len(self.player.queue) - 1))
         elif key == ord("?"):
             self.showing_help = True
 

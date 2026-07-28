@@ -33,7 +33,7 @@ PyPI does not reserve a pending project name until the first publish. Confirm th
    ```
 
 3. Commit and push the release changes, including the version bump.
-4. Create and publish a GitHub Release with a matching tag, for example `v0.3.1`.
+4. Create and publish a GitHub Release with a matching tag, for example `v0.4.0`.
 5. The **Publish to PyPI** workflow builds, validates, and uploads the release. Approve the `pypi` environment if GitHub asks.
 6. Verify the release, then users can install or update from anywhere:
 

@@ -51,6 +51,32 @@ class OpenTuneTests(unittest.TestCase):
         self.assertEqual(player.queue, [])
         player.close()
 
+    def test_queue_delete_and_clear_undo_redo(self):
+        from opentune.__main__ import Player
+
+        player = Player()
+        player.mpv.play = lambda track, loop=False: None
+        first = Track("First Song", "https://www.youtube.com/watch?v=first")
+        second = Track("Second Song", "https://www.youtube.com/watch?v=second")
+        third = Track("Third Song", "https://www.youtube.com/watch?v=third")
+        for track in (first, second, third):
+            player.enqueue(track)
+
+        player.remove_queue_at(1)
+        self.assertEqual(player.queue, [first, third])
+        self.assertTrue(player.undo_queue_action())
+        self.assertEqual(player.queue, [first, second, third])
+        self.assertTrue(player.redo_queue_action())
+        self.assertEqual(player.queue, [first, third])
+
+        player.clear_queue()
+        self.assertEqual(player.queue, [])
+        self.assertTrue(player.undo_queue_action())
+        self.assertEqual(player.queue, [first, third])
+        self.assertTrue(player.redo_queue_action())
+        self.assertEqual(player.queue, [])
+        player.close()
+
     def test_failed_mpv_does_not_advance_queue(self):
         class FakeProcess:
             returncode = 1

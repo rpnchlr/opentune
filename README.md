@@ -193,6 +193,8 @@ opentune --help
 | `a` | Append the selected search result to the Queue without playing it |
 | `d` | Delete the selected track from the Queue |
 | `c` | Clear the Queue |
+| `u` | Undo the last queue deletion or clear |
+| `Ctrl-r` | Redo the last undone queue deletion or clear |
 | `?` | Open/close the in-player key reference |
 | `Esc` in search | Cancel search and keep the current results |
 | `q` or `Esc` outside search | Quit OpenTune (or close the `?` help overlay) |
@@ -211,7 +213,12 @@ Selecting a search result starts a YouTube radio-style mix. OpenTune filters dup
 - Highlight a queued track and press `Enter` to jump directly to it.
 - Press `a` on a search result to append it without interrupting playback.
 - Press `d` to remove the highlighted queue item, or `c` to clear the whole queue.
+- Press `u` to undo the latest deletion/clear, or `Ctrl-r` to redo it.
 - Use `Tab` to return to Results.
+
+Undo and redo are intentionally limited to queue deletion and queue clearing.
+Playback, search, pause, seeking, looping, and adding tracks are not recorded
+in the undo history.
 
 The queue is kept in memory for the current session only. It is cleared when OpenTune exits.
 
