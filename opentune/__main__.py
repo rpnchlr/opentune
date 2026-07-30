@@ -50,7 +50,7 @@ Main window keys:
   Space          Pause or resume
   h / l          Previous / next track
   H / L          Rewind / forward 10 seconds
-  Ctrl-o         Toggle looping for the current track
+  Ctrl-o         Toggle looping for the current track (any window)
   Tab            Switch between Results and Queue
   /              Search YouTube from inside OpenTune
   a              Append the selected search result to the Queue
@@ -59,7 +59,7 @@ Main window keys:
   u              Undo the last queue delete/clear
   Ctrl-r         Redo the last undone queue delete/clear
   p<N>           Add focused result/queue track to playlist N
-  Ctrl-d         Download the current track
+  Ctrl-d         Download the current/focused track
   P              Toggle the Playlists window
   ?              Toggle this key reference in the TUI
   q              Quit OpenTune (the only quit key)
@@ -75,6 +75,8 @@ Playlists window keys:
   r              Rename the focused playlist
   f              Search the open playlist
   D              Delete selected song, or focused playlist (confirm first)
+  Ctrl-d         Download the focused song (open playlist only)
+  Ctrl-o         Toggle looping (works from any window)
   P              Toggle the Playlists window
 
 Playlist notes:
@@ -1094,14 +1096,15 @@ class PlaylistTUI:
             "H/L seek · Ctrl-o loop · Tab Results/Queue · / search",
             "a append · d delete queue · c clear · u undo · Ctrl-r redo",
             "p<N> add focused track to playlist · Ctrl-d download",
-            "P toggle playlists · Ctrl-h/l focus panes · q quit",
+            "Ctrl-o loop anywhere · P toggle playlists · Ctrl-h/l focus panes",
+            "q quit",
             "",
             "PLAYLISTS WINDOW",
             "j/k move · l enter · h leave · Enter play",
             "a create (list only) · r rename · f find in playlist",
             "p pin/unpin playlist (list only) · D delete song or playlist",
             "D always asks for confirmation; Downloads cannot be deleted",
-            "P toggle pane · Ctrl-h/l focus panes · ? close help",
+            "Ctrl-d download · Ctrl-o loop · P toggle pane · ? close help",
         ]
         for index, line in enumerate(lines[:height]):
             attr = curses.A_BOLD if index in (0, 7) else curses.A_NORMAL
@@ -1256,13 +1259,12 @@ class PlaylistTUI:
         self.playlist_track_index = max(0, self.playlist_track_index - 1)
         self.player.message = f"Permanently removed {track.title}"
 
-    def download_current(self) -> None:
-        track = self.player.current
-        if track is None:
-            self.player.message = "Nothing is currently playing"
-            return
+    def download_track(self, track: Track) -> None:
         downloads = self.store.get(0)
         if downloads is None:
+            return
+        if track.local_path and Path(track.local_path).exists():
+            self.player.message = f"Already downloaded: {track.title}"
             return
         self.player.message = f"Downloading: {track.title}"
 
@@ -1275,6 +1277,21 @@ class PlaylistTUI:
                 self.player.message = str(error)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def download_current(self) -> None:
+        track = self.player.current
+        if track is None:
+            self.player.message = "Nothing is currently playing"
+            return
+        self.download_track(track)
+
+    def download_playlist_track(self) -> None:
+        selected = self.playlist_track()
+        if selected is None:
+            self.player.message = "Open a playlist and select a song first"
+            return
+        _, _, track = selected
+        self.download_track(track)
 
     def handle_main(self, key: int) -> None:
         if key == ord("q"):
@@ -1352,10 +1369,15 @@ class PlaylistTUI:
                 self.delete_playlist_track()
             else:
                 self.delete_playlist()
+        elif key == 4 and self.active_playlist_id is not None:
+            self.download_playlist_track()
         elif key == ord("?"):
             self.showing_help = True
 
     def handle(self, key: int) -> None:
+        if key == 15:
+            self.player.toggle_loop()
+            return
         if key == ord("P"):
             self.toggle_panel()
             return

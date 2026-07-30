@@ -191,7 +191,7 @@ opentune --help
 | `l` | Play the next queued track |
 | `H` (`Shift+h`) | Rewind 10 seconds |
 | `L` (`Shift+l`) | Forward 10 seconds |
-| `Ctrl-o` | Toggle looping of the current track |
+| `Ctrl-o` | Toggle looping of the current track from any window |
 | `Tab` | Switch between **Results** and **Queue** |
 | `/` | Open a search prompt |
 | `a` | Append the selected search result to the Queue without playing it |
@@ -200,7 +200,7 @@ opentune --help
 | `u` | Undo the last queue deletion or clear |
 | `Ctrl-r` | Redo the last undone queue deletion or clear |
 | `p<N>` | Add the focused result/queue track to playlist number `N` |
-| `Ctrl-d` | Download the current track to Downloads |
+| `Ctrl-d` | Download the current/focused track to Downloads |
 | `P` | Toggle the Playlists pane |
 | `Ctrl-h` / `Ctrl-l` | Focus the main / Playlists pane when it is open |
 | `?` | Open/close the in-player key reference |
@@ -258,6 +258,7 @@ Downloaded audio files are stored in:
 | `p` | Pin/unpin the focused playlist (Downloads is always pinned) |
 | `r` | Rename the focused playlist (`Downloads` cannot be renamed) |
 | `D` | Delete the focused playlist after confirmation (`Downloads` is protected) |
+| `Ctrl-d` | Download the focused song when a playlist is open |
 | `P` | Toggle the pane |
 | `Ctrl-h` / `Ctrl-l` | Focus the main / Playlists pane |
 
@@ -284,10 +285,11 @@ the YouTube URL and metadata; it does not download the song.
 
 ### Downloads
 
-Focus a currently playing track in the main window and press `Ctrl-d`. OpenTune
-uses `yt-dlp` and `ffmpeg` to save an MP3 under `~/Music/opentune/Downloads/`
-and adds it to the pinned Downloads playlist. Deleting a Downloads entry after
-confirmation also removes its local audio file permanently.
+Focus a currently playing track in the main window and press `Ctrl-d`, or open
+a playlist, focus one of its songs, and press `Ctrl-d`. OpenTune uses `yt-dlp`
+and `ffmpeg` to save an MP3 under `~/Music/opentune/Downloads/` and adds it to
+the pinned Downloads playlist. Deleting a Downloads entry after confirmation
+also removes its local audio file permanently.
 
 The `a` key creates playlists only when the Playlists pane is focused on the
 playlist list. It remains the main-window append action everywhere else.
@@ -296,7 +298,10 @@ The queue is kept in memory for the current session only. It is cleared when Ope
 
 ### Looping
 
-`Ctrl-o` loops the currently playing track. The screen header displays `LOOP` while it is enabled. Turn it off with `Ctrl-o` again; then, when a track ends, OpenTune advances to the next item in the queue. `Ctrl-l` is reserved for focusing the Playlists pane when it is open.
+`Ctrl-o` loops the currently playing track from either the main window or the
+Playlists window. The screen header displays `LOOP` while it is enabled. Turn
+it off with `Ctrl-o` again; then, when a track ends, OpenTune advances to the
+next item in the queue. `Ctrl-l` is reserved for focusing the Playlists pane.
 
 ## Troubleshooting
 

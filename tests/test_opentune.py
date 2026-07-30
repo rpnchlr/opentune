@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from opentune.__main__ import MPV, PlaylistStore, PlaylistTUI, Track, YouTube, format_time
+from opentune.__main__ import Downloader, MPV, PlaylistStore, PlaylistTUI, Track, YouTube, format_time
 
 
 class OpenTuneTests(unittest.TestCase):
@@ -163,6 +163,8 @@ class OpenTuneTests(unittest.TestCase):
             tui.playlist_track_index = 0
             tui.playlist_search = ""
             tui.player = StubPlayer()
+            tui.showing_help = False
+            tui.focus = "main"
 
             tui.handle_main(27)  # Esc is not a quit key outside a prompt.
             self.assertTrue(tui.running)
@@ -179,3 +181,41 @@ class OpenTuneTests(unittest.TestCase):
             self.assertEqual(tui.active_playlist_id, "downloads")
             tui.handle_playlists(ord("h"))
             self.assertIsNone(tui.active_playlist_id)
+
+            tui.focus = "playlists"
+            tui.handle(15)
+            self.assertEqual(tui.player.loop_toggles, 3)
+
+    def test_ctrl_d_downloads_focused_open_playlist_song(self):
+        class StubPlayer:
+            message = ""
+
+        class ImmediateThread:
+            def __init__(self, target, daemon=False):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = PlaylistStore(Path(directory) / "Playlists")
+            playlist = store.create("Saved songs")
+            track = Track("Saved Song", "https://www.youtube.com/watch?v=saved")
+            store.add_track(playlist, track)
+            downloaded = Track(
+                track.title,
+                track.url,
+                local_path=str(Path(directory) / "saved.mp3"),
+            )
+            tui = PlaylistTUI.__new__(PlaylistTUI)
+            tui.store = store
+            tui.player = StubPlayer()
+            tui.active_playlist_id = playlist.id
+            tui.playlist_track_index = 0
+            tui.playlist_search = ""
+
+            with patch.object(Downloader, "download", return_value=downloaded), \
+                    patch("opentune.__main__.threading.Thread", ImmediateThread):
+                tui.handle_playlists(4)  # Ctrl-d
+
+            self.assertEqual(store.get(0).tracks, [downloaded])
