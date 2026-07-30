@@ -58,7 +58,7 @@ Main window keys:
   c              Clear the Queue
   u              Undo the last queue delete/clear
   Ctrl-r         Redo the last undone queue delete/clear
-  p<N>           Add focused result/queue track to playlist N
+  p<N>           Add focused result/queue track to user playlist N
   Ctrl-d         Download the current/focused track
   P              Toggle the Playlists window
   ?              Toggle this key reference in the TUI
@@ -80,7 +80,7 @@ Playlists window keys:
   P              Toggle the Playlists window
 
 Playlist notes:
-  Downloads is pinned at index 1. p<N> uses the visible playlist index.
+  Downloads has no user-playlist index. p<N> targets user playlists only.
   Pinned user playlists stay above unpinned playlists.
   Esc only cancels prompts and closes the help overlay; it never quits.
   Undo/redo do not apply to playlist song changes.
@@ -551,6 +551,10 @@ class PlaylistStore:
             ))
         downloads = self._load_playlist("downloads", "Downloads", True)
         self._playlists.insert(0, downloads)
+        self._atomic_write(
+            self._playlist_path("downloads"),
+            [self._track_to_json(track) for track in downloads.tracks],
+        )
         self._save_manifest()
 
     def _load_playlist(self, playlist_id: str, name: str, pinned: bool = False) -> Playlist:
@@ -561,6 +565,13 @@ class PlaylistStore:
                 raw = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(raw, list):
                     tracks = [self._track_from_json(item) for item in raw if isinstance(item, dict)]
+                    if playlist_id == "downloads":
+                        # Downloads is rebuilt only from files that still exist;
+                        # old metadata-only entries are intentionally discarded.
+                        tracks = [
+                            track for track in tracks
+                            if track.local_path and Path(track.local_path).is_file()
+                        ]
             except (OSError, json.JSONDecodeError):
                 tracks = []
         return Playlist(playlist_id, name, tracks, pinned)
@@ -590,6 +601,14 @@ class PlaylistStore:
     def get(self, index: int) -> Playlist | None:
         return self._playlists[index] if 0 <= index < len(self._playlists) else None
 
+    def user_playlists(self) -> list[Playlist]:
+        """Return only user-created playlists, excluding Downloads."""
+        return [playlist for playlist in self._playlists if playlist.id != "downloads"]
+
+    def get_user(self, index: int) -> Playlist | None:
+        playlists = self.user_playlists()
+        return playlists[index] if 0 <= index < len(playlists) else None
+
     def create(self, name: str = "") -> Playlist:
         name = name.strip()
         if not name:
@@ -612,10 +631,26 @@ class PlaylistStore:
         return True
 
     def add_track(self, playlist: Playlist, track: Track) -> bool:
+        if playlist.id == "downloads":
+            return False
         if any(item.url == track.url for item in playlist.tracks):
             return False
         playlist.tracks.append(track)
         self._save_playlist(playlist)
+        return True
+
+    def add_download(self, track: Track) -> bool:
+        """Add a track to Downloads only when its local file exists."""
+        if not track.local_path or not Path(track.local_path).is_file():
+            return False
+        return self._add_download_unchecked(track)
+
+    def _add_download_unchecked(self, track: Track) -> bool:
+        downloads = self.get(0)
+        if downloads is None or any(item.url == track.url for item in downloads.tracks):
+            return False
+        downloads.tracks.append(track)
+        self._save_playlist(downloads)
         return True
 
     def remove_track(self, playlist: Playlist, index: int) -> Track | None:
@@ -995,7 +1030,7 @@ class PlaylistTUI:
             self.player.message = "Playlist number cancelled"
             return
         index = int("".join(digits)) - 1
-        playlist = self.store.get(index)
+        playlist = self.store.get_user(index)
         if playlist is None:
             self.player.message = "Invalid playlist number"
             return
@@ -1095,7 +1130,7 @@ class PlaylistTUI:
             "j/k move · Enter play · Space pause · h/l prev/next",
             "H/L seek · Ctrl-o loop · Tab Results/Queue · / search",
             "a append · d delete queue · c clear · u undo · Ctrl-r redo",
-            "p<N> add focused track to playlist · Ctrl-d download",
+            "p<N> add focused track to user playlist · Ctrl-d download",
             "Ctrl-o loop anywhere · P toggle playlists · Ctrl-h/l focus panes",
             "q quit",
             "",
@@ -1120,11 +1155,17 @@ class PlaylistTUI:
         self.screen.hline(1, left + 1, curses.ACS_HLINE, max(1, width - 1))
         if playlist is None:
             items = self.store.all()
+            user_number = 0
             for line, item in enumerate(items[: max(1, height - 5)]):
                 marker = "›" if line == self.playlist_index else " "
                 pin = "★ " if item.pinned else "  "
                 attr = curses.A_REVERSE if line == self.playlist_index and self.focus == "playlists" else curses.A_NORMAL
-                text = f"{marker} {line + 1}. {pin}{item.name} ({len(item.tracks)})"
+                if item.id == "downloads":
+                    label = f"{pin}{item.name}"
+                else:
+                    user_number += 1
+                    label = f"{user_number}. {pin}{item.name}"
+                text = f"{marker} {label} ({len(item.tracks)})"
                 self.screen.addnstr(3 + line, left + 2, self.clipped(text, width - 3), max(1, width - 3), attr)
             footer = "a new · p pin · D delete · l enter"
         else:
@@ -1271,8 +1312,10 @@ class PlaylistTUI:
         def worker() -> None:
             try:
                 local_track = Downloader.download(track, self.store.download_dir)
-                self.store.add_track(downloads, local_track)
-                self.player.message = f"Downloaded: {track.title}"
+                if self.store.add_download(local_track):
+                    self.player.message = f"Downloaded: {track.title}"
+                else:
+                    self.player.message = "Download finished but the local file was not registered"
             except RuntimeError as error:
                 self.player.message = str(error)
 

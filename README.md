@@ -199,7 +199,7 @@ opentune --help
 | `c` | Clear the Queue |
 | `u` | Undo the last queue deletion or clear |
 | `Ctrl-r` | Redo the last undone queue deletion or clear |
-| `p<N>` | Add the focused result/queue track to playlist number `N` |
+| `p<N>` | Add the focused result/queue track to user playlist number `N` |
 | `Ctrl-d` | Download the current/focused track to Downloads |
 | `P` | Toggle the Playlists pane |
 | `Ctrl-h` / `Ctrl-l` | Focus the main / Playlists pane when it is open |
@@ -235,8 +235,9 @@ Press `P` to open or close the Playlists pane. It occupies about 40% of the
 terminal width. When open, `Ctrl-h` focuses the main player and `Ctrl-l` focuses
 the Playlists pane. The pane stays open after starting a playlist track.
 
-The pinned `Downloads` playlist is index `1`; user playlists are appended below
-it in creation order. Playlist files are stored in:
+The pinned `Downloads` playlist has no user-playlist index. User-created
+playlists are numbered from `1` in the visible list and remain in creation
+order (with pinned user playlists grouped first). Playlist files are stored in:
 
 ```text
 ~/Music/opentune/Playlists/
@@ -280,9 +281,10 @@ with `p<N>` from a main-window search result or queue item.
 ### Adding tracks to a playlist
 
 Focus a search result or queue item in the main window, press `p`, then type its
-playlist number. For example, `p3` adds the focused track to playlist `3`.
-The number is the visible index shown before each playlist name. This stores
-the YouTube URL and metadata; it does not download the song.
+user-playlist number. For example, `p3` adds the focused track to user playlist
+`3`. Downloads is not a numbered target and cannot receive songs through
+`p<N>`; it is populated only by successful `Ctrl-d` downloads. This stores the
+YouTube URL and metadata in user playlists; it does not download the song.
 
 ### Downloads
 

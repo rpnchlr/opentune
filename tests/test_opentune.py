@@ -119,9 +119,22 @@ class OpenTuneTests(unittest.TestCase):
             local_file.write_bytes(b"audio")
             track = Track("Downloaded", "https://www.youtube.com/watch?v=downloaded", local_path=str(local_file))
             downloads = store.get(0)
-            store.add_track(downloads, track)
+            self.assertTrue(store.add_download(track))
             store.remove_track(downloads, 0)
             self.assertFalse(local_file.exists())
+
+    def test_downloads_reject_metadata_only_tracks_and_user_indexes_skip_downloads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Playlists"
+            store = PlaylistStore(root)
+            first = store.create("First")
+            second = store.create("Second")
+            metadata_only = Track("Not downloaded", "https://www.youtube.com/watch?v=not-local")
+            self.assertFalse(store.add_track(store.get(0), metadata_only))
+            self.assertIsNone(store.get_user(-1))
+            self.assertIs(store.get_user(0), first)
+            self.assertIs(store.get_user(1), second)
+            self.assertIsNone(store.get_user(2))
 
     def test_playlist_pinning_and_deletion(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -207,6 +220,7 @@ class OpenTuneTests(unittest.TestCase):
                 track.url,
                 local_path=str(Path(directory) / "saved.mp3"),
             )
+            Path(downloaded.local_path).write_bytes(b"audio")
             tui = PlaylistTUI.__new__(PlaylistTUI)
             tui.store = store
             tui.player = StubPlayer()
