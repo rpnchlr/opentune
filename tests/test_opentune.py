@@ -1,8 +1,10 @@
 import io
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from opentune.__main__ import MPV, Track, YouTube, format_time
+from opentune.__main__ import MPV, PlaylistStore, Track, YouTube, format_time
 
 
 class OpenTuneTests(unittest.TestCase):
@@ -95,3 +97,28 @@ class OpenTuneTests(unittest.TestCase):
         mpv._watch(process)
         self.assertEqual(finished, [])
         self.assertEqual(errors, ["network error"])
+
+    def test_playlists_persist_and_default_names_are_numbered(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Playlists"
+            store = PlaylistStore(root)
+            self.assertEqual(store.get(0).name, "Downloads")
+            first = store.create()
+            second = store.create()
+            track = Track("Saved Song", "https://www.youtube.com/watch?v=saved", uploader="Artist")
+            self.assertTrue(store.add_track(second, track))
+            reloaded = PlaylistStore(root)
+            self.assertEqual([item.name for item in reloaded.all()], ["Downloads", "My Playlist #1", "My Playlist #2"])
+            self.assertEqual(reloaded.get(2).tracks[0], track)
+
+    def test_download_playlist_removal_deletes_local_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Playlists"
+            store = PlaylistStore(root)
+            local_file = Path(directory) / "song.mp3"
+            local_file.write_bytes(b"audio")
+            track = Track("Downloaded", "https://www.youtube.com/watch?v=downloaded", local_path=str(local_file))
+            downloads = store.get(0)
+            store.add_track(downloads, track)
+            store.remove_track(downloads, 0)
+            self.assertFalse(local_file.exists())

@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import re
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -42,7 +43,7 @@ Examples:
 Options:
   -h, --help     Show this help and exit.
 
-Player keys:
+Main window keys:
   j / Down       Select next result or queue track
   k / Up         Select previous result or queue track
   Enter          Play the selected track
@@ -57,8 +58,26 @@ Player keys:
   c              Clear the Queue
   u              Undo the last queue delete/clear
   Ctrl-r         Redo the last undone queue delete/clear
+  p<N>           Add focused result/queue track to playlist N
+  Ctrl-d         Download the current track
+  P              Toggle the Playlists window
   ?              Toggle this key reference in the TUI
-  q / Esc        Quit (Esc cancels an active search prompt)
+  q              Quit (Esc cancels a search prompt)
+
+Playlists window keys:
+  Ctrl-h / Ctrl-l Focus main / playlists pane
+  j / k          Move down / up
+  Enter          Open a playlist, or play its selected song
+  Esc            Leave the open playlist
+  a              Create a playlist (playlist list only)
+  r              Rename the focused playlist
+  f              Search the open playlist
+  D              Permanently delete selected playlist song (confirm first)
+  P              Toggle the Playlists window
+
+Playlist notes:
+  Downloads is pinned at index 1. p<N> uses the visible playlist index.
+  Undo/redo do not apply to playlist song changes.
 
 OpenTune requires mpv and yt-dlp. It streams audio only and does not
 download tracks. Selecting a result creates a YouTube radio-style mix,
@@ -72,10 +91,15 @@ class Track:
     url: str
     duration: int = 0
     uploader: str = ""
+    local_path: str = ""
 
     @property
     def label(self) -> str:
         return f"{self.title} — {self.uploader}" if self.uploader else self.title
+
+    @property
+    def source(self) -> str:
+        return self.local_path or self.url
 
 
 def format_time(seconds: float | int | None) -> str:
@@ -217,7 +241,7 @@ class MPV:
         self._intentional_stop = False
         command = [
             "mpv", "--no-video", "--force-window=no", "--really-quiet",
-            f"--input-ipc-server={self.socket_path}", "--ytdl-format=bestaudio/best", track.url,
+            f"--input-ipc-server={self.socket_path}", "--ytdl-format=bestaudio/best", track.source,
         ]
         if loop:
             command.insert(-1, "--loop-file=inf")
@@ -451,6 +475,179 @@ class Player:
         self.mpv.close()
 
 
+    def replace_queue(self, tracks: list[Track], current: Track | None = None) -> None:
+        with self._lock:
+            current_url = current.url if current else ""
+            self.queue = [track for track in tracks if track.url != current_url]
+            self._queue_redo.clear()
+            self.message = f"Playlist loaded: {len(self.queue) + (1 if current else 0)} tracks"
+
+
+@dataclass
+class Playlist:
+    id: str
+    name: str
+    tracks: list[Track]
+    pinned: bool = False
+
+
+class PlaylistStore:
+    """Persistent playlist storage under ~/Music/opentune."""
+
+    def __init__(self, root: Path | None = None) -> None:
+        self.root = Path(root) if root else Path.home() / "Music" / "opentune" / "Playlists"
+        self.download_dir = self.root.parent / "Downloads"
+        self.manifest_path = self.root / "index.json"
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.download_dir.mkdir(parents=True, exist_ok=True)
+        self._playlists: list[Playlist] = []
+        self._load()
+
+    @staticmethod
+    def _track_from_json(data: dict[str, Any]) -> Track:
+        return Track(
+            title=str(data.get("title") or "Untitled"),
+            url=str(data.get("url") or ""),
+            duration=int(data.get("duration") or 0),
+            uploader=str(data.get("uploader") or ""),
+            local_path=str(data.get("local_path") or ""),
+        )
+
+    @staticmethod
+    def _track_to_json(track: Track) -> dict[str, Any]:
+        return {
+            "title": track.title,
+            "url": track.url,
+            "duration": track.duration,
+            "uploader": track.uploader,
+            "local_path": track.local_path,
+        }
+
+    def _playlist_path(self, playlist_id: str) -> Path:
+        return self.root / ("downloads.json" if playlist_id == "downloads" else f"{playlist_id}.json")
+
+    def _load(self) -> None:
+        entries: list[dict[str, Any]] = []
+        if self.manifest_path.exists():
+            try:
+                raw = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+                entries = raw if isinstance(raw, list) else []
+            except (OSError, json.JSONDecodeError):
+                entries = []
+        for entry in entries:
+            playlist_id = str(entry.get("id") or "")
+            if not playlist_id or playlist_id == "downloads":
+                continue
+            self._playlists.append(self._load_playlist(
+                playlist_id,
+                str(entry.get("name") or "Untitled Playlist"),
+                bool(entry.get("pinned", False)),
+            ))
+        downloads = self._load_playlist("downloads", "Downloads", True)
+        self._playlists.insert(0, downloads)
+        self._save_manifest()
+
+    def _load_playlist(self, playlist_id: str, name: str, pinned: bool = False) -> Playlist:
+        tracks: list[Track] = []
+        path = self._playlist_path(playlist_id)
+        if path.exists():
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(raw, list):
+                    tracks = [self._track_from_json(item) for item in raw if isinstance(item, dict)]
+            except (OSError, json.JSONDecodeError):
+                tracks = []
+        return Playlist(playlist_id, name, tracks, pinned)
+
+    def _save_manifest(self) -> None:
+        self._atomic_write(self.manifest_path, [
+            {"id": item.id, "name": item.name, "pinned": item.pinned}
+            for item in self._playlists
+        ])
+
+    @staticmethod
+    def _atomic_write(path: Path, data: Any) -> None:
+        temporary = path.with_name(f".{path.name}.tmp")
+        temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        temporary.replace(path)
+
+    def _save_playlist(self, playlist: Playlist) -> None:
+        self._atomic_write(
+            self._playlist_path(playlist.id),
+            [self._track_to_json(track) for track in playlist.tracks],
+        )
+        self._save_manifest()
+
+    def all(self) -> list[Playlist]:
+        return list(self._playlists)
+
+    def get(self, index: int) -> Playlist | None:
+        return self._playlists[index] if 0 <= index < len(self._playlists) else None
+
+    def create(self, name: str = "") -> Playlist:
+        name = name.strip()
+        if not name:
+            used = {item.name for item in self._playlists}
+            number = 1
+            while f"My Playlist #{number}" in used:
+                number += 1
+            name = f"My Playlist #{number}"
+        playlist = Playlist(f"playlist-{uuid.uuid4().hex}", name, [])
+        self._playlists.append(playlist)
+        self._save_playlist(playlist)
+        return playlist
+
+    def rename(self, playlist: Playlist, name: str) -> bool:
+        name = name.strip()
+        if not name or playlist.pinned:
+            return False
+        playlist.name = name
+        self._save_playlist(playlist)
+        return True
+
+    def add_track(self, playlist: Playlist, track: Track) -> bool:
+        if any(item.url == track.url for item in playlist.tracks):
+            return False
+        playlist.tracks.append(track)
+        self._save_playlist(playlist)
+        return True
+
+    def remove_track(self, playlist: Playlist, index: int) -> Track | None:
+        if not 0 <= index < len(playlist.tracks):
+            return None
+        removed = playlist.tracks.pop(index)
+        self._save_playlist(playlist)
+        if playlist.pinned and removed.local_path:
+            try:
+                Path(removed.local_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+        return removed
+
+
+class Downloader:
+    @staticmethod
+    def download(track: Track, directory: Path) -> Track:
+        if not shutil.which("ffmpeg"):
+            raise RuntimeError("Downloading requires ffmpeg; install it and try again")
+        directory.mkdir(parents=True, exist_ok=True)
+        output = directory / "%(title)s [%(id)s].%(ext)s"
+        command = [
+            "yt-dlp", "--no-playlist", "--format", "bestaudio/best",
+            "--extract-audio", "--audio-format", "mp3",
+            "--output", str(output), "--print", "after_move:filepath", track.url,
+        ]
+        try:
+            completed = subprocess.run(command, capture_output=True, text=True, timeout=900, check=True)
+        except (subprocess.SubprocessError, OSError) as error:
+            raise RuntimeError(f"Download failed: {error}") from error
+        candidates = [Path(line.strip()) for line in completed.stdout.splitlines() if line.strip()]
+        downloaded = next((path for path in reversed(candidates) if path.exists()), None)
+        if downloaded is None:
+            raise RuntimeError("Download completed but its output file was not found")
+        return Track(track.title, track.url, track.duration, track.uploader, str(downloaded))
+
+
 class TUI:
     def __init__(self, screen: curses.window, player: Player, initial_query: str = "") -> None:
         self.screen, self.player = screen, player
@@ -662,6 +859,457 @@ class TUI:
             time.sleep(0.08)
 
 
+class PlaylistTUI:
+    """Full-screen player with an optional right-side playlist pane."""
+
+    def __init__(self, screen: curses.window, player: Player, store: PlaylistStore, initial_query: str = "") -> None:
+        self.screen, self.player, self.store = screen, player, store
+        self.results: list[Track] = []
+        self.result_index = 0
+        self.queue_index = 0
+        self.tab = 0
+        self.running = True
+        self.showing_help = False
+        self.panel_open = False
+        self.focus = "main"
+        self.playlist_index = 0
+        self.active_playlist_id: str | None = None
+        self.playlist_track_index = 0
+        self.playlist_search = ""
+        curses.curs_set(0)
+        screen.nodelay(True)
+        screen.keypad(True)
+        if initial_query:
+            self.search(initial_query)
+
+    @staticmethod
+    def clipped(value: str, width: int) -> str:
+        return value if len(value) <= width else value[: max(0, width - 1)] + "…"
+
+    def main_width(self, total_width: int) -> int:
+        return total_width if not self.panel_open else max(1, int(total_width * 0.6))
+
+    def search(self, query: str) -> None:
+        self.player.message = f"Searching YouTube for: {query}"
+        self.draw()
+        try:
+            self.results = YouTube.search(query)
+            self.result_index = 0
+            self.tab = 0
+            self.player.message = f"{len(self.results)} music results for “{query}”"
+        except RuntimeError as error:
+            self.player.message = str(error)
+
+    def prompt_line(self, label: str) -> str | None:
+        height, width = self.screen.getmaxyx()
+        self.screen.nodelay(False)
+        curses.curs_set(1)
+        chars: list[str] = []
+        cancelled = False
+        try:
+            while True:
+                self.screen.move(height - 1, 0)
+                self.screen.clrtoeol()
+                text = f"{label}: {''.join(chars)}"
+                self.screen.addnstr(height - 1, 0, text, width - 1)
+                self.screen.refresh()
+                key = self.screen.getch()
+                if key in (27, 3):
+                    cancelled = True
+                    break
+                if key in (10, 13, curses.KEY_ENTER):
+                    break
+                if key in (curses.KEY_BACKSPACE, 8, 127):
+                    if chars:
+                        chars.pop()
+                elif 32 <= key <= 126:
+                    chars.append(chr(key))
+        finally:
+            self.screen.move(height - 1, 0)
+            self.screen.clrtoeol()
+            self.screen.refresh()
+            curses.curs_set(0)
+            self.screen.nodelay(True)
+        return None if cancelled else "".join(chars).strip()
+
+    def prompt_search(self) -> None:
+        query = self.prompt_line("Search")
+        if query is None:
+            self.player.message = "Search cancelled"
+        elif query:
+            self.search(query)
+
+    def prompt_playlist_number(self) -> None:
+        """Read p<N> without making users press a second Enter key."""
+        height, width = self.screen.getmaxyx()
+        self.screen.nodelay(False)
+        self.screen.timeout(500)
+        self.screen.move(height - 1, 0)
+        self.screen.clrtoeol()
+        self.screen.addnstr(height - 1, 0, "Playlist number: ", width - 1)
+        self.screen.refresh()
+        digits: list[str] = []
+        while len(digits) < 4:
+            key = self.screen.getch()
+            if key < 0 or not 48 <= key <= 57:
+                break
+            digits.append(chr(key))
+            self.screen.addch(chr(key))
+        self.screen.timeout(-1)
+        self.screen.nodelay(True)
+        self.screen.move(height - 1, 0)
+        self.screen.clrtoeol()
+        self.screen.refresh()
+        if not digits:
+            self.player.message = "Playlist number cancelled"
+            return
+        index = int("".join(digits)) - 1
+        playlist = self.store.get(index)
+        if playlist is None:
+            self.player.message = "Invalid playlist number"
+            return
+        track = self.focused_main_track()
+        if track is None:
+            self.player.message = "Select a search result or queue track first"
+            return
+        if self.store.add_track(playlist, track):
+            self.player.message = f"Added to playlist {index + 1}: {playlist.name}"
+        else:
+            self.player.message = f"Track already exists in {playlist.name}"
+
+    def prompt_confirm(self, message: str) -> bool:
+        height, width = self.screen.getmaxyx()
+        self.screen.nodelay(False)
+        self.screen.move(height - 1, 0)
+        self.screen.clrtoeol()
+        self.screen.addnstr(height - 1, 0, f"{message} [1. yes / 2. no]", width - 1)
+        self.screen.refresh()
+        key = self.screen.getch()
+        self.screen.nodelay(True)
+        self.screen.move(height - 1, 0)
+        self.screen.clrtoeol()
+        self.screen.refresh()
+        return key == ord("1")
+
+    def focused_main_track(self) -> Track | None:
+        if self.tab == 0 and self.results:
+            return self.results[self.result_index]
+        if self.tab == 1 and self.player.queue:
+            return self.player.queue[self.queue_index]
+        return None
+
+    def current_playlist(self) -> Playlist | None:
+        if self.active_playlist_id is None:
+            return None
+        return next((item for item in self.store.all() if item.id == self.active_playlist_id), None)
+
+    def visible_playlist_tracks(self, playlist: Playlist) -> list[tuple[int, Track]]:
+        query = self.playlist_search.lower().strip()
+        return [
+            (index, track) for index, track in enumerate(playlist.tracks)
+            if not query or query in track.title.lower() or query in track.uploader.lower()
+        ]
+
+    def playlist_track(self) -> tuple[Playlist, int, Track] | None:
+        playlist = self.current_playlist()
+        if playlist is None:
+            return None
+        visible = self.visible_playlist_tracks(playlist)
+        if not visible or not 0 <= self.playlist_track_index < len(visible):
+            return None
+        index, track = visible[self.playlist_track_index]
+        return playlist, index, track
+
+    def draw_track_list(self, items: list[Track], selected: int, top: int, height: int, left: int, width: int, focus_name: str = "main") -> None:
+        if not items:
+            self.screen.addnstr(top, left + 1, "Nothing here yet.", max(1, width - 2), curses.A_DIM)
+            return
+        start = max(0, min(selected - height + 1, len(items) - height))
+        for line, index in enumerate(range(start, min(len(items), start + height))):
+            item = items[index]
+            marker = "›" if index == selected else " "
+            text = f"{marker} {index + 1:2}. {item.label}  [{format_time(item.duration)}]"
+            attr = curses.A_REVERSE if index == selected and self.focus == focus_name else curses.A_NORMAL
+            self.screen.addnstr(top + line, left + 1, self.clipped(text, width - 2), max(1, width - 2), attr)
+
+    def draw_main(self, width: int) -> None:
+        height, _ = self.screen.getmaxyx()
+        current = self.player.current
+        position, paused = self.player.mpv.state() if current else (0, False)
+        title = current.title if current else "Nothing playing"
+        mode = "ERROR" if current and self.player.playback_failed else "PAUSED" if paused else "PLAYING" if current else "IDLE"
+        loop = " LOOP" if self.player.loop else ""
+        self.screen.addnstr(0, 1, f" OPENTUNE  ·  {mode}{loop}", max(1, width - 2), curses.A_BOLD)
+        self.screen.hline(1, 0, curses.ACS_HLINE, width)
+        self.screen.addnstr(2, 2, self.clipped(title, width - 4), max(1, width - 4), curses.A_BOLD)
+        duration = current.duration if current else 0
+        self.screen.addnstr(3, 2, f"{format_time(position)} / {format_time(duration)}", max(1, width - 4), curses.A_DIM)
+        self.screen.hline(5, 0, curses.ACS_HLINE, width)
+        tabs = "[ Results ]" if self.tab == 0 else "  Results  "
+        tabs += "     " + ("[ Queue ]" if self.tab == 1 else "  Queue  ")
+        self.screen.addnstr(6, 2, tabs, max(1, width - 4), curses.A_BOLD)
+        list_height = max(1, height - 10)
+        if self.showing_help:
+            self.draw_help(8, width, list_height)
+        elif self.tab == 0:
+            self.draw_track_list(self.results, self.result_index, 8, list_height, 0, width)
+        else:
+            self.draw_track_list(self.player.queue, self.queue_index, 8, list_height, 0, width)
+        self.screen.hline(height - 2, 0, curses.ACS_HLINE, width)
+        self.screen.addnstr(height - 1, 2, self.clipped(self.player.message, width - 4), max(1, width - 4), curses.A_DIM)
+
+    def draw_help(self, top: int, width: int, height: int) -> None:
+        lines = [
+            "MAIN WINDOW",
+            "j/k move · Enter play · Space pause · h/l prev/next",
+            "H/L seek · Ctrl-l loop · Tab Results/Queue · / search",
+            "a append · d delete queue · c clear · u undo · Ctrl-r redo",
+            "p<N> add focused track to playlist · Ctrl-d download",
+            "P toggle playlists · Ctrl-h/l focus panes · q quit",
+            "",
+            "PLAYLISTS WINDOW",
+            "j/k move · Enter open/play · Esc leave playlist",
+            "a create (list only) · r rename · f find in playlist",
+            "D permanently delete song (confirmation required)",
+            "P toggle pane · Ctrl-h/l focus panes · ? close help",
+        ]
+        for index, line in enumerate(lines[:height]):
+            attr = curses.A_BOLD if index in (0, 7) else curses.A_NORMAL
+            self.screen.addnstr(top + index, 1, self.clipped(line, width - 2), max(1, width - 2), attr)
+
+    def draw_playlists(self, left: int, width: int) -> None:
+        height, _ = self.screen.getmaxyx()
+        self.screen.vline(0, left, curses.ACS_VLINE, height)
+        playlist = self.current_playlist()
+        heading = "PLAYLISTS" if playlist is None else f"PLAYLIST: {playlist.name}"
+        focus_attr = curses.A_BOLD if self.focus == "playlists" else curses.A_DIM
+        self.screen.addnstr(0, left + 2, self.clipped(heading, width - 3), max(1, width - 3), focus_attr)
+        self.screen.hline(1, left + 1, curses.ACS_HLINE, max(1, width - 1))
+        if playlist is None:
+            items = self.store.all()
+            for line, item in enumerate(items[: max(1, height - 5)]):
+                marker = "›" if line == self.playlist_index else " "
+                pin = "★ " if item.pinned else "  "
+                attr = curses.A_REVERSE if line == self.playlist_index and self.focus == "playlists" else curses.A_NORMAL
+                text = f"{marker} {line + 1}. {pin}{item.name} ({len(item.tracks)})"
+                self.screen.addnstr(3 + line, left + 2, self.clipped(text, width - 3), max(1, width - 3), attr)
+            footer = "a new · r rename · Enter open"
+        else:
+            visible = self.visible_playlist_tracks(playlist)
+            tracks = [track for _, track in visible]
+            self.draw_track_list(tracks, self.playlist_track_index, 3, max(1, height - 7), left + 1, width - 1, "playlists")
+            footer = f"{len(visible)} songs" + (f" · find: {self.playlist_search}" if self.playlist_search else "")
+        self.screen.addnstr(height - 2, left + 2, self.clipped(footer, width - 3), max(1, width - 3), curses.A_DIM)
+
+    def draw(self) -> None:
+        self.screen.erase()
+        height, width = self.screen.getmaxyx()
+        main_width = self.main_width(width)
+        self.draw_main(main_width)
+        if self.panel_open:
+            self.draw_playlists(main_width, width - main_width)
+        self.screen.refresh()
+
+    def toggle_panel(self) -> None:
+        self.panel_open = not self.panel_open
+        self.focus = "playlists" if self.panel_open else "main"
+
+    def move_main(self, delta: int) -> None:
+        if self.tab == 0:
+            self.result_index = max(0, min(len(self.results) - 1, self.result_index + delta))
+        else:
+            self.queue_index = max(0, min(len(self.player.queue) - 1, self.queue_index + delta))
+
+    def move_playlists(self, delta: int) -> None:
+        if self.active_playlist_id is None:
+            self.playlist_index = max(0, min(len(self.store.all()) - 1, self.playlist_index + delta))
+        else:
+            playlist = self.current_playlist()
+            count = len(self.visible_playlist_tracks(playlist)) if playlist else 0
+            self.playlist_track_index = max(0, min(count - 1, self.playlist_track_index + delta))
+
+    def open_or_play_playlist(self) -> None:
+        if self.active_playlist_id is None:
+            playlist = self.store.get(self.playlist_index)
+            if playlist:
+                self.active_playlist_id = playlist.id
+                self.playlist_track_index = 0
+                self.playlist_search = ""
+            return
+        selected = self.playlist_track()
+        if selected is None:
+            return
+        playlist, _, track = selected
+        self.player.replace_queue(playlist.tracks, track)
+        self.queue_index = 0
+        self.player.start(track, build_mix=False)
+        self.player.message = f"Playing from {playlist.name}: {track.title}"
+
+    def create_playlist(self) -> None:
+        name = self.prompt_line("New playlist name")
+        if name is None:
+            self.player.message = "Playlist creation cancelled"
+            return
+        playlist = self.store.create(name)
+        self.playlist_index = len(self.store.all()) - 1
+        self.player.message = f"Created playlist {playlist.name}"
+
+    def rename_playlist(self) -> None:
+        playlist = self.current_playlist() if self.active_playlist_id else self.store.get(self.playlist_index)
+        if playlist is None or playlist.pinned:
+            self.player.message = "Downloads cannot be renamed"
+            return
+        name = self.prompt_line("Rename playlist")
+        if name is not None and self.store.rename(playlist, name):
+            self.player.message = f"Renamed playlist to {name}"
+
+    def find_playlist(self) -> None:
+        if self.active_playlist_id is None:
+            return
+        query = self.prompt_line("Find in playlist")
+        if query is None:
+            self.player.message = "Playlist search cancelled"
+            return
+        self.playlist_search = query
+        self.playlist_track_index = 0
+        self.player.message = f"Found {len(self.visible_playlist_tracks(self.current_playlist()))} matching songs"
+
+    def delete_playlist_track(self) -> None:
+        selected = self.playlist_track()
+        if selected is None:
+            return
+        playlist, index, track = selected
+        if not self.prompt_confirm(f"Do you want to delete '{track.title}'?"):
+            self.player.message = "Deletion cancelled"
+            return
+        self.store.remove_track(playlist, index)
+        self.playlist_track_index = max(0, self.playlist_track_index - 1)
+        self.player.message = f"Permanently removed {track.title}"
+
+    def download_current(self) -> None:
+        track = self.player.current
+        if track is None:
+            self.player.message = "Nothing is currently playing"
+            return
+        downloads = self.store.get(0)
+        if downloads is None:
+            return
+        self.player.message = f"Downloading: {track.title}"
+
+        def worker() -> None:
+            try:
+                local_track = Downloader.download(track, self.store.download_dir)
+                self.store.add_track(downloads, local_track)
+                self.player.message = f"Downloaded: {track.title}"
+            except RuntimeError as error:
+                self.player.message = str(error)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def handle_main(self, key: int) -> None:
+        if key in (ord("q"), 27):
+            self.running = False
+        elif key in (ord("j"), curses.KEY_DOWN):
+            self.move_main(1)
+        elif key in (ord("k"), curses.KEY_UP):
+            self.move_main(-1)
+        elif key in (10, 13, curses.KEY_ENTER):
+            if self.tab == 0 and self.results:
+                self.player.start(self.results[self.result_index])
+            elif self.tab == 1 and self.player.queue:
+                track = self.player.take_queue_at(self.queue_index)
+                if track:
+                    self.queue_index = max(0, min(self.queue_index, len(self.player.queue) - 1))
+                    self.player.start(track, build_mix=False)
+        elif key == ord(" "):
+            self.player.mpv.toggle_pause()
+        elif key == ord("h"):
+            self.player.previous()
+        elif key == ord("l"):
+            self.player.next()
+        elif key == ord("H"):
+            self.player.mpv.seek(-10)
+        elif key == ord("L"):
+            self.player.mpv.seek(10)
+        elif key == 12 and not self.panel_open:
+            self.player.toggle_loop()
+        elif key == 9:
+            self.tab = 1 - self.tab
+        elif key == ord("/"):
+            self.prompt_search()
+        elif key == ord("a"):
+            track = self.focused_main_track()
+            if track:
+                self.player.enqueue(track)
+        elif key == ord("d") and self.tab == 1:
+            self.player.remove_queue_at(self.queue_index)
+            self.queue_index = max(0, min(self.queue_index, len(self.player.queue) - 1))
+        elif key == ord("c"):
+            self.player.clear_queue()
+            self.queue_index = 0
+        elif key == ord("u"):
+            self.player.undo_queue_action()
+        elif key == 18:
+            self.player.redo_queue_action()
+        elif key == ord("p"):
+            self.prompt_playlist_number()
+        elif key == 4:
+            self.download_current()
+
+    def handle_playlists(self, key: int) -> None:
+        if key in (ord("q"),):
+            self.running = False
+        elif key in (ord("j"), curses.KEY_DOWN):
+            self.move_playlists(1)
+        elif key in (ord("k"), curses.KEY_UP):
+            self.move_playlists(-1)
+        elif key in (10, 13, curses.KEY_ENTER):
+            self.open_or_play_playlist()
+        elif key == 27 and self.active_playlist_id is not None:
+            self.active_playlist_id = None
+            self.playlist_search = ""
+        elif key == ord("a") and self.active_playlist_id is None:
+            self.create_playlist()
+        elif key == ord("r"):
+            self.rename_playlist()
+        elif key == ord("f"):
+            self.find_playlist()
+        elif key == ord("D") and self.active_playlist_id is not None:
+            self.delete_playlist_track()
+        elif key == ord("?"):
+            self.showing_help = True
+
+    def handle(self, key: int) -> None:
+        if key == ord("P"):
+            self.toggle_panel()
+            return
+        if key == ord("?"):
+            self.showing_help = not self.showing_help
+            return
+        if self.showing_help:
+            if key in (27, ord("q"), ord("?")):
+                self.showing_help = False
+            return
+        if self.panel_open and key == 8:
+            self.focus = "main"
+            return
+        if self.panel_open and key == 12:
+            self.focus = "playlists"
+            return
+        if self.focus == "playlists" and self.panel_open:
+            self.handle_playlists(key)
+        else:
+            self.handle_main(key)
+
+    def run(self) -> None:
+        while self.running:
+            self.draw()
+            key = self.screen.getch()
+            if key != -1:
+                self.handle(key)
+            time.sleep(0.08)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="opentune",
@@ -677,8 +1325,9 @@ def main() -> int:
         print(f"opentune: {missing}", file=sys.stderr)
         return 1
     player = Player()
+    store = PlaylistStore()
     try:
-        curses.wrapper(lambda screen: TUI(screen, player, " ".join(args.query)).run())
+        curses.wrapper(lambda screen: PlaylistTUI(screen, player, store, " ".join(args.query)).run())
     except curses.error as error:
         print(f"opentune: terminal UI error: {error}", file=sys.stderr)
         return 1

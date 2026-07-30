@@ -12,6 +12,9 @@ It is deliberately small: OpenTune streams audio; it does not download songs, re
 - Use Vim-like navigation (`h`, `j`, `k`, `l`) as well as arrow keys
 - Create a short related mix after you choose a song
 - Show the upcoming mix in a Queue tab
+- Create persistent playlists in a right-side terminal pane
+- Download tracks to a pinned local Downloads playlist
+- Search and edit playlist contents without affecting the playback queue
 - Display the playing title, elapsed time, total duration, and playback state
 
 ## How it works
@@ -33,18 +36,19 @@ Install these before installing OpenTune:
 - Python 3.10 or newer
 - [`mpv`](https://mpv.io/) — audio playback and YouTube streaming
 - [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) — YouTube search metadata
+- `ffmpeg` — required only for `Ctrl-d` audio downloads
 
 Examples for common Linux distributions:
 
 ```sh
 # Arch Linux
-sudo pacman -S python mpv yt-dlp
+sudo pacman -S python mpv yt-dlp ffmpeg
 
 # Debian / Ubuntu
-sudo apt install python3 python3-pip mpv yt-dlp
+sudo apt install python3 python3-pip mpv yt-dlp ffmpeg
 
 # Fedora
-sudo dnf install python3 python3-pip mpv yt-dlp
+sudo dnf install python3 python3-pip mpv yt-dlp ffmpeg
 ```
 
 If YouTube changes its site, updating `yt-dlp` is usually the first thing to try when search or playback stops working.
@@ -195,6 +199,10 @@ opentune --help
 | `c` | Clear the Queue |
 | `u` | Undo the last queue deletion or clear |
 | `Ctrl-r` | Redo the last undone queue deletion or clear |
+| `p<N>` | Add the focused result/queue track to playlist number `N` |
+| `Ctrl-d` | Download the current track to Downloads |
+| `P` | Toggle the Playlists pane |
+| `Ctrl-h` / `Ctrl-l` | Focus the main / Playlists pane when it is open |
 | `?` | Open/close the in-player key reference |
 | `Esc` in search | Cancel search and keep the current results |
 | `q` or `Esc` outside search | Quit OpenTune (or close the `?` help overlay) |
@@ -219,6 +227,67 @@ Selecting a search result starts a YouTube radio-style mix. OpenTune filters dup
 Undo and redo are intentionally limited to queue deletion and queue clearing.
 Playback, search, pause, seeking, looping, and adding tracks are not recorded
 in the undo history.
+
+## Playlists window
+
+Press `P` to open or close the Playlists pane. It occupies about 40% of the
+terminal width. When open, `Ctrl-h` focuses the main player and `Ctrl-l` focuses
+the Playlists pane. The pane stays open after starting a playlist track.
+
+The pinned `Downloads` playlist is index `1`; user playlists are appended below
+it in creation order. Playlist files are stored in:
+
+```text
+~/Music/opentune/Playlists/
+```
+
+Downloaded audio files are stored in:
+
+```text
+~/Music/opentune/Downloads/
+```
+
+### Playlist list keys
+
+| Key | Action |
+| --- | --- |
+| `j` / `k` | Move down/up through playlists |
+| `Enter` | Open the focused playlist |
+| `a` | Create a playlist; an empty name becomes `My Playlist #N` |
+| `r` | Rename the focused playlist (`Downloads` cannot be renamed) |
+| `P` | Toggle the pane |
+| `Ctrl-h` / `Ctrl-l` | Focus the main / Playlists pane |
+
+### Open playlist keys
+
+| Key | Action |
+| --- | --- |
+| `j` / `k` | Move through songs |
+| `Enter` | Play the focused song and load the playlist into the temporary queue |
+| `Esc` | Leave the current playlist and return to the playlist list |
+| `f` | Search the current playlist by title or uploader |
+| `D` (`Shift+d`) | Permanently delete the focused song after confirmation |
+| `P` | Toggle the pane without closing the playlist |
+
+Playlist song deletion has no undo/redo. A deleted song must be added again
+with `p<N>` from a main-window search result or queue item.
+
+### Adding tracks to a playlist
+
+Focus a search result or queue item in the main window, press `p`, then type its
+playlist number. For example, `p3` adds the focused track to playlist `3`.
+The number is the visible index shown before each playlist name. This stores
+the YouTube URL and metadata; it does not download the song.
+
+### Downloads
+
+Focus a currently playing track in the main window and press `Ctrl-d`. OpenTune
+uses `yt-dlp` and `ffmpeg` to save an MP3 under `~/Music/opentune/Downloads/`
+and adds it to the pinned Downloads playlist. Deleting a Downloads entry after
+confirmation also removes its local audio file permanently.
+
+The `a` key creates playlists only when the Playlists pane is focused on the
+playlist list. It remains the main-window append action everywhere else.
 
 The queue is kept in memory for the current session only. It is cleared when OpenTune exits.
 
