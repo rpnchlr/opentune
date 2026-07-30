@@ -70,7 +70,7 @@ Playlists window keys:
   l              Enter the focused playlist (playlist list only)
   h              Leave the open playlist (open playlist only)
   Enter          Play the selected song (open playlist only)
-  a              Create a playlist (playlist list only)
+  a              Create a playlist, or append its focused song to Queue
   p              Pin/unpin the focused playlist (playlist list only)
   r              Rename the focused playlist
   f              Search the open playlist
@@ -1101,7 +1101,7 @@ class PlaylistTUI:
             "",
             "PLAYLISTS WINDOW",
             "j/k move · l enter · h leave · Enter play",
-            "a create (list only) · r rename · f find in playlist",
+            "a create (list) / append song (open) · r rename · f find",
             "p pin/unpin playlist (list only) · D delete song or playlist",
             "D always asks for confirmation; Downloads cannot be deleted",
             "Ctrl-d download · Ctrl-o loop · P toggle pane · ? close help",
@@ -1131,7 +1131,7 @@ class PlaylistTUI:
             visible = self.visible_playlist_tracks(playlist)
             tracks = [track for _, track in visible]
             self.draw_track_list(tracks, self.playlist_track_index, 3, max(1, height - 7), left + 1, width - 1, "playlists")
-            footer = f"{len(visible)} songs" + (f" · find: {self.playlist_search}" if self.playlist_search else "")
+            footer = f"{len(visible)} songs · a append" + (f" · find: {self.playlist_search}" if self.playlist_search else "")
         self.screen.addnstr(height - 2, left + 2, self.clipped(footer, width - 3), max(1, width - 3), curses.A_DIM)
 
     def draw(self) -> None:
@@ -1293,6 +1293,14 @@ class PlaylistTUI:
         _, _, track = selected
         self.download_track(track)
 
+    def enqueue_playlist_track(self) -> None:
+        selected = self.playlist_track()
+        if selected is None:
+            self.player.message = "Select a song in the open playlist first"
+            return
+        _, _, track = selected
+        self.player.enqueue(track)
+
     def handle_main(self, key: int) -> None:
         if key == ord("q"):
             self.running = False
@@ -1356,8 +1364,11 @@ class PlaylistTUI:
             self.enter_playlist()
         elif key == ord("h") and self.active_playlist_id is not None:
             self.leave_playlist()
-        elif key == ord("a") and self.active_playlist_id is None:
-            self.create_playlist()
+        elif key == ord("a"):
+            if self.active_playlist_id is None:
+                self.create_playlist()
+            else:
+                self.enqueue_playlist_track()
         elif key == ord("r"):
             self.rename_playlist()
         elif key == ord("f"):

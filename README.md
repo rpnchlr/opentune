@@ -269,6 +269,7 @@ Downloaded audio files are stored in:
 | `j` / `k` | Move through songs |
 | `Enter` | Play the focused song and load the playlist into the temporary queue |
 | `h` | Leave the current playlist and return to the playlist list |
+| `a` | Append the focused song to the temporary Queue without playing it |
 | `f` | Search the current playlist by title or uploader |
 | `D` (`Shift+d`) | Permanently delete the focused song after confirmation |
 | `P` | Toggle the pane without closing the playlist |
@@ -292,7 +293,8 @@ the pinned Downloads playlist. Deleting a Downloads entry after confirmation
 also removes its local audio file permanently.
 
 The `a` key creates playlists only when the Playlists pane is focused on the
-playlist list. It remains the main-window append action everywhere else.
+playlist list. Inside an open playlist it appends the focused song to the
+temporary Queue; in the main window it appends the focused result or queue item.
 
 The queue is kept in memory for the current session only. It is cleared when OpenTune exits.
 

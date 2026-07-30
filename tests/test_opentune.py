@@ -219,3 +219,29 @@ class OpenTuneTests(unittest.TestCase):
                 tui.handle_playlists(4)  # Ctrl-d
 
             self.assertEqual(store.get(0).tracks, [downloaded])
+
+    def test_a_appends_focused_open_playlist_song_to_queue(self):
+        class StubPlayer:
+            def __init__(self):
+                self.queue = []
+                self.message = ""
+
+            def enqueue(self, track):
+                self.queue.append(track)
+                return True
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = PlaylistStore(Path(directory) / "Playlists")
+            playlist = store.create("Saved songs")
+            track = Track("Saved Song", "https://www.youtube.com/watch?v=saved")
+            store.add_track(playlist, track)
+            tui = PlaylistTUI.__new__(PlaylistTUI)
+            tui.store = store
+            tui.player = StubPlayer()
+            tui.active_playlist_id = playlist.id
+            tui.playlist_track_index = 0
+            tui.playlist_search = ""
+
+            tui.handle_playlists(ord("a"))
+
+            self.assertEqual(tui.player.queue, [track])
