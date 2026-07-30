@@ -177,7 +177,7 @@ opentune --help
 4. Press `Enter` to start the highlighted result.
 5. The title and time appear at the top of the screen.
 6. OpenTune prepares a YouTube radio-style mix in the background. Press `Tab` to view it in the **Queue** tab.
-7. Press `q` or `Esc` to quit.
+7. Press `q` to quit. `Esc` only cancels an active prompt or closes the help overlay.
 
 ## Keybinds
 
@@ -191,7 +191,7 @@ opentune --help
 | `l` | Play the next queued track |
 | `H` (`Shift+h`) | Rewind 10 seconds |
 | `L` (`Shift+l`) | Forward 10 seconds |
-| `Ctrl+l` | Toggle looping of the current track |
+| `Ctrl-o` | Toggle looping of the current track |
 | `Tab` | Switch between **Results** and **Queue** |
 | `/` | Open a search prompt |
 | `a` | Append the selected search result to the Queue without playing it |
@@ -204,8 +204,9 @@ opentune --help
 | `P` | Toggle the Playlists pane |
 | `Ctrl-h` / `Ctrl-l` | Focus the main / Playlists pane when it is open |
 | `?` | Open/close the in-player key reference |
-| `Esc` in search | Cancel search and keep the current results |
-| `q` or `Esc` outside search | Quit OpenTune (or close the `?` help overlay) |
+| `Esc` in a prompt | Cancel search, playlist creation, rename, or confirmation |
+| `Esc` in help | Close the help overlay |
+| `q` | Quit OpenTune (the only quit key) |
 
 ## Results, playback, and the queue
 
@@ -252,7 +253,7 @@ Downloaded audio files are stored in:
 | Key | Action |
 | --- | --- |
 | `j` / `k` | Move down/up through playlists |
-| `Enter` | Open the focused playlist |
+| `l` | Enter the focused playlist |
 | `a` | Create a playlist; an empty name becomes `My Playlist #N` |
 | `p` | Pin/unpin the focused playlist (Downloads is always pinned) |
 | `r` | Rename the focused playlist (`Downloads` cannot be renamed) |
@@ -266,7 +267,7 @@ Downloaded audio files are stored in:
 | --- | --- |
 | `j` / `k` | Move through songs |
 | `Enter` | Play the focused song and load the playlist into the temporary queue |
-| `Esc` | Leave the current playlist and return to the playlist list |
+| `h` | Leave the current playlist and return to the playlist list |
 | `f` | Search the current playlist by title or uploader |
 | `D` (`Shift+d`) | Permanently delete the focused song after confirmation |
 | `P` | Toggle the pane without closing the playlist |
@@ -295,7 +296,7 @@ The queue is kept in memory for the current session only. It is cleared when Ope
 
 ### Looping
 
-`Ctrl+l` loops the currently playing track. The screen header displays `LOOP` while it is enabled. Turn it off with `Ctrl+l` again; then, when a track ends, OpenTune advances to the next item in the queue.
+`Ctrl-o` loops the currently playing track. The screen header displays `LOOP` while it is enabled. Turn it off with `Ctrl-o` again; then, when a track ends, OpenTune advances to the next item in the queue. `Ctrl-l` is reserved for focusing the Playlists pane when it is open.
 
 ## Troubleshooting
 

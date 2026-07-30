@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from opentune.__main__ import MPV, PlaylistStore, Track, YouTube, format_time
+from opentune.__main__ import MPV, PlaylistStore, PlaylistTUI, Track, YouTube, format_time
 
 
 class OpenTuneTests(unittest.TestCase):
@@ -143,3 +143,39 @@ class OpenTuneTests(unittest.TestCase):
             self.assertTrue(reloaded.delete_playlist(removable))
             self.assertFalse(playlist_file.exists())
             self.assertEqual([item.name for item in reloaded.all()], ["Downloads", "First"])
+
+    def test_contextual_keybinds_do_not_conflict(self):
+        class StubPlayer:
+            def __init__(self):
+                self.loop_toggles = 0
+
+            def toggle_loop(self):
+                self.loop_toggles += 1
+
+        with tempfile.TemporaryDirectory() as directory:
+            tui = PlaylistTUI.__new__(PlaylistTUI)
+            tui.running = True
+            tui.panel_open = False
+            tui.tab = 0
+            tui.store = PlaylistStore(Path(directory) / "Playlists")
+            tui.playlist_index = 0
+            tui.active_playlist_id = None
+            tui.playlist_track_index = 0
+            tui.playlist_search = ""
+            tui.player = StubPlayer()
+
+            tui.handle_main(27)  # Esc is not a quit key outside a prompt.
+            self.assertTrue(tui.running)
+            tui.handle_main(ord("q"))
+            self.assertFalse(tui.running)
+
+            tui.running = True
+            tui.handle_main(15)  # Ctrl-o is loop; Ctrl-l remains pane focus.
+            self.assertEqual(tui.player.loop_toggles, 1)
+            tui.panel_open = True
+            tui.handle_main(15)
+            self.assertEqual(tui.player.loop_toggles, 2)
+            tui.handle_playlists(ord("l"))
+            self.assertEqual(tui.active_playlist_id, "downloads")
+            tui.handle_playlists(ord("h"))
+            self.assertIsNone(tui.active_playlist_id)

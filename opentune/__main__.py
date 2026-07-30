@@ -50,7 +50,7 @@ Main window keys:
   Space          Pause or resume
   h / l          Previous / next track
   H / L          Rewind / forward 10 seconds
-  Ctrl-l         Toggle looping for the current track
+  Ctrl-o         Toggle looping for the current track
   Tab            Switch between Results and Queue
   /              Search YouTube from inside OpenTune
   a              Append the selected search result to the Queue
@@ -62,13 +62,14 @@ Main window keys:
   Ctrl-d         Download the current track
   P              Toggle the Playlists window
   ?              Toggle this key reference in the TUI
-  q              Quit (Esc cancels a search prompt)
+  q              Quit OpenTune (the only quit key)
 
 Playlists window keys:
   Ctrl-h / Ctrl-l Focus main / playlists pane
   j / k          Move down / up
-  Enter          Open a playlist, or play its selected song
-  Esc            Leave the open playlist
+  l              Enter the focused playlist (playlist list only)
+  h              Leave the open playlist (open playlist only)
+  Enter          Play the selected song (open playlist only)
   a              Create a playlist (playlist list only)
   p              Pin/unpin the focused playlist (playlist list only)
   r              Rename the focused playlist
@@ -79,6 +80,7 @@ Playlists window keys:
 Playlist notes:
   Downloads is pinned at index 1. p<N> uses the visible playlist index.
   Pinned user playlists stay above unpinned playlists.
+  Esc only cancels prompts and closes the help overlay; it never quits.
   Undo/redo do not apply to playlist song changes.
 
 OpenTune requires mpv and yt-dlp. It streams audio only and does not
@@ -791,7 +793,7 @@ class TUI:
             "",
             "j / ↓    down       k / ↑    up        Enter    play selection",
             "Space    pause/play h        previous  l        next",
-            "H        rewind 10s L        forward 10s Ctrl-l   toggle loop",
+            "H        rewind 10s L        forward 10s Ctrl-o   toggle loop",
             "Tab      Results/Queue       /        search     a        add to Queue",
             "d        delete from Queue  c        clear Queue u        undo",
             "Ctrl-r   redo               ?        this help    q        quit",
@@ -834,10 +836,10 @@ class TUI:
 
     def handle(self, key: int) -> None:
         if self.showing_help:
-            if key in (ord("?"), 27, ord("q")):
+            if key in (ord("?"), 27):
                 self.showing_help = False
             return
-        if key in (ord("q"), 27):
+        if key == ord("q"):
             self.running = False
         elif key in (ord("j"), curses.KEY_DOWN):
             self.move(1)
@@ -857,7 +859,7 @@ class TUI:
             self.player.mpv.seek(-10)
         elif key == ord("L"):
             self.player.mpv.seek(10)
-        elif key == 12:  # Ctrl-l
+        elif key == 15:  # Ctrl-o
             self.player.toggle_loop()
         elif key == ord("/"):
             self.prompt_search()
@@ -1089,13 +1091,13 @@ class PlaylistTUI:
         lines = [
             "MAIN WINDOW",
             "j/k move · Enter play · Space pause · h/l prev/next",
-            "H/L seek · Ctrl-l loop · Tab Results/Queue · / search",
+            "H/L seek · Ctrl-o loop · Tab Results/Queue · / search",
             "a append · d delete queue · c clear · u undo · Ctrl-r redo",
             "p<N> add focused track to playlist · Ctrl-d download",
             "P toggle playlists · Ctrl-h/l focus panes · q quit",
             "",
             "PLAYLISTS WINDOW",
-            "j/k move · Enter open/play · Esc leave playlist",
+            "j/k move · l enter · h leave · Enter play",
             "a create (list only) · r rename · f find in playlist",
             "p pin/unpin playlist (list only) · D delete song or playlist",
             "D always asks for confirmation; Downloads cannot be deleted",
@@ -1121,7 +1123,7 @@ class PlaylistTUI:
                 attr = curses.A_REVERSE if line == self.playlist_index and self.focus == "playlists" else curses.A_NORMAL
                 text = f"{marker} {line + 1}. {pin}{item.name} ({len(item.tracks)})"
                 self.screen.addnstr(3 + line, left + 2, self.clipped(text, width - 3), max(1, width - 3), attr)
-            footer = "a new · p pin · r rename · D delete · Enter open"
+            footer = "a new · p pin · D delete · l enter"
         else:
             visible = self.visible_playlist_tracks(playlist)
             tracks = [track for _, track in visible]
@@ -1156,13 +1158,23 @@ class PlaylistTUI:
             count = len(self.visible_playlist_tracks(playlist)) if playlist else 0
             self.playlist_track_index = max(0, min(count - 1, self.playlist_track_index + delta))
 
-    def open_or_play_playlist(self) -> None:
+    def enter_playlist(self) -> None:
+        if self.active_playlist_id is not None:
+            return
+        playlist = self.store.get(self.playlist_index)
+        if playlist:
+            self.active_playlist_id = playlist.id
+            self.playlist_track_index = 0
+            self.playlist_search = ""
+
+    def leave_playlist(self) -> None:
         if self.active_playlist_id is None:
-            playlist = self.store.get(self.playlist_index)
-            if playlist:
-                self.active_playlist_id = playlist.id
-                self.playlist_track_index = 0
-                self.playlist_search = ""
+            return
+        self.active_playlist_id = None
+        self.playlist_search = ""
+
+    def play_playlist_track(self) -> None:
+        if self.active_playlist_id is None:
             return
         selected = self.playlist_track()
         if selected is None:
@@ -1265,7 +1277,7 @@ class PlaylistTUI:
         threading.Thread(target=worker, daemon=True).start()
 
     def handle_main(self, key: int) -> None:
-        if key in (ord("q"), 27):
+        if key == ord("q"):
             self.running = False
         elif key in (ord("j"), curses.KEY_DOWN):
             self.move_main(1)
@@ -1289,7 +1301,7 @@ class PlaylistTUI:
             self.player.mpv.seek(-10)
         elif key == ord("L"):
             self.player.mpv.seek(10)
-        elif key == 12 and not self.panel_open:
+        elif key == 15:
             self.player.toggle_loop()
         elif key == 9:
             self.tab = 1 - self.tab
@@ -1321,11 +1333,12 @@ class PlaylistTUI:
             self.move_playlists(1)
         elif key in (ord("k"), curses.KEY_UP):
             self.move_playlists(-1)
-        elif key in (10, 13, curses.KEY_ENTER):
-            self.open_or_play_playlist()
-        elif key == 27 and self.active_playlist_id is not None:
-            self.active_playlist_id = None
-            self.playlist_search = ""
+        elif key in (10, 13, curses.KEY_ENTER) and self.active_playlist_id is not None:
+            self.play_playlist_track()
+        elif key == ord("l") and self.active_playlist_id is None:
+            self.enter_playlist()
+        elif key == ord("h") and self.active_playlist_id is not None:
+            self.leave_playlist()
         elif key == ord("a") and self.active_playlist_id is None:
             self.create_playlist()
         elif key == ord("r"):
@@ -1350,7 +1363,9 @@ class PlaylistTUI:
             self.showing_help = not self.showing_help
             return
         if self.showing_help:
-            if key in (27, ord("q"), ord("?")):
+            if key == ord("q"):
+                self.running = False
+            elif key in (27, ord("?")):
                 self.showing_help = False
             return
         if self.panel_open and key == 8:
