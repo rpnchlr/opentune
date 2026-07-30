@@ -254,7 +254,9 @@ Downloaded audio files are stored in:
 | `j` / `k` | Move down/up through playlists |
 | `Enter` | Open the focused playlist |
 | `a` | Create a playlist; an empty name becomes `My Playlist #N` |
+| `p` | Pin/unpin the focused playlist (Downloads is always pinned) |
 | `r` | Rename the focused playlist (`Downloads` cannot be renamed) |
+| `D` | Delete the focused playlist after confirmation (`Downloads` is protected) |
 | `P` | Toggle the pane |
 | `Ctrl-h` / `Ctrl-l` | Focus the main / Playlists pane |
 

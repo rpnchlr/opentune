@@ -70,13 +70,15 @@ Playlists window keys:
   Enter          Open a playlist, or play its selected song
   Esc            Leave the open playlist
   a              Create a playlist (playlist list only)
+  p              Pin/unpin the focused playlist (playlist list only)
   r              Rename the focused playlist
   f              Search the open playlist
-  D              Permanently delete selected playlist song (confirm first)
+  D              Delete selected song, or focused playlist (confirm first)
   P              Toggle the Playlists window
 
 Playlist notes:
   Downloads is pinned at index 1. p<N> uses the visible playlist index.
+  Pinned user playlists stay above unpinned playlists.
   Undo/redo do not apply to playlist song changes.
 
 OpenTune requires mpv and yt-dlp. It streams audio only and does not
@@ -624,6 +626,31 @@ class PlaylistStore:
                 pass
         return removed
 
+    def toggle_pin(self, playlist: Playlist) -> bool | None:
+        """Toggle a user playlist's pinned state and keep Downloads first."""
+        if playlist.id == "downloads" or playlist not in self._playlists:
+            return None
+        playlist.pinned = not playlist.pinned
+        downloads = self._playlists[0]
+        custom = self._playlists[1:]
+        pinned = [item for item in custom if item.pinned]
+        unpinned = [item for item in custom if not item.pinned]
+        self._playlists = [downloads, *pinned, *unpinned]
+        self._save_manifest()
+        return playlist.pinned
+
+    def delete_playlist(self, playlist: Playlist) -> bool:
+        """Delete a user playlist and its metadata, never the pinned Downloads list."""
+        if playlist.id == "downloads" or playlist not in self._playlists:
+            return False
+        self._playlists = [item for item in self._playlists if item.id != playlist.id]
+        try:
+            self._playlist_path(playlist.id).unlink(missing_ok=True)
+        except OSError:
+            pass
+        self._save_manifest()
+        return True
+
 
 class Downloader:
     @staticmethod
@@ -1070,7 +1097,8 @@ class PlaylistTUI:
             "PLAYLISTS WINDOW",
             "j/k move · Enter open/play · Esc leave playlist",
             "a create (list only) · r rename · f find in playlist",
-            "D permanently delete song (confirmation required)",
+            "p pin/unpin playlist (list only) · D delete song or playlist",
+            "D always asks for confirmation; Downloads cannot be deleted",
             "P toggle pane · Ctrl-h/l focus panes · ? close help",
         ]
         for index, line in enumerate(lines[:height]):
@@ -1093,7 +1121,7 @@ class PlaylistTUI:
                 attr = curses.A_REVERSE if line == self.playlist_index and self.focus == "playlists" else curses.A_NORMAL
                 text = f"{marker} {line + 1}. {pin}{item.name} ({len(item.tracks)})"
                 self.screen.addnstr(3 + line, left + 2, self.clipped(text, width - 3), max(1, width - 3), attr)
-            footer = "a new · r rename · Enter open"
+            footer = "a new · p pin · r rename · D delete · Enter open"
         else:
             visible = self.visible_playlist_tracks(playlist)
             tracks = [track for _, track in visible]
@@ -1162,6 +1190,36 @@ class PlaylistTUI:
         name = self.prompt_line("Rename playlist")
         if name is not None and self.store.rename(playlist, name):
             self.player.message = f"Renamed playlist to {name}"
+
+    def toggle_pin_playlist(self) -> None:
+        if self.active_playlist_id is not None:
+            return
+        playlist = self.store.get(self.playlist_index)
+        if playlist is None:
+            return
+        pinned = self.store.toggle_pin(playlist)
+        if pinned is None:
+            self.player.message = "Downloads is always pinned"
+            return
+        self.playlist_index = self.store.all().index(playlist)
+        self.player.message = f"{'Pinned' if pinned else 'Unpinned'} playlist: {playlist.name}"
+
+    def delete_playlist(self) -> None:
+        if self.active_playlist_id is not None:
+            return
+        playlist = self.store.get(self.playlist_index)
+        if playlist is None:
+            return
+        if playlist.id == "downloads":
+            self.player.message = "Downloads playlist cannot be deleted"
+            return
+        if not self.prompt_confirm(f"Do you want to delete playlist '{playlist.name}'?"):
+            self.player.message = "Deletion cancelled"
+            return
+        name = playlist.name
+        if self.store.delete_playlist(playlist):
+            self.playlist_index = max(0, min(self.playlist_index, len(self.store.all()) - 1))
+            self.player.message = f"Deleted playlist: {name}"
 
     def find_playlist(self) -> None:
         if self.active_playlist_id is None:
@@ -1274,8 +1332,13 @@ class PlaylistTUI:
             self.rename_playlist()
         elif key == ord("f"):
             self.find_playlist()
-        elif key == ord("D") and self.active_playlist_id is not None:
-            self.delete_playlist_track()
+        elif key == ord("p") and self.active_playlist_id is None:
+            self.toggle_pin_playlist()
+        elif key == ord("D"):
+            if self.active_playlist_id is not None:
+                self.delete_playlist_track()
+            else:
+                self.delete_playlist()
         elif key == ord("?"):
             self.showing_help = True
 

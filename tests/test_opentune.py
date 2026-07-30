@@ -122,3 +122,24 @@ class OpenTuneTests(unittest.TestCase):
             store.add_track(downloads, track)
             store.remove_track(downloads, 0)
             self.assertFalse(local_file.exists())
+
+    def test_playlist_pinning_and_deletion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Playlists"
+            store = PlaylistStore(root)
+            first = store.create("First")
+            second = store.create("Second")
+            self.assertEqual([item.name for item in store.all()], ["Downloads", "First", "Second"])
+
+            self.assertTrue(store.toggle_pin(second))
+            self.assertEqual([item.name for item in store.all()], ["Downloads", "Second", "First"])
+            reloaded = PlaylistStore(root)
+            self.assertEqual([item.name for item in reloaded.all()], ["Downloads", "Second", "First"])
+            self.assertTrue(reloaded.get(1).pinned)
+
+            removable = reloaded.get(1)
+            playlist_file = root / f"{removable.id}.json"
+            self.assertTrue(playlist_file.exists())
+            self.assertTrue(reloaded.delete_playlist(removable))
+            self.assertFalse(playlist_file.exists())
+            self.assertEqual([item.name for item in reloaded.all()], ["Downloads", "First"])
