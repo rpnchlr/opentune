@@ -2,7 +2,9 @@
 
 OpenTune is a terminal music player for Linux/Unix systems. Search YouTube for a song, choose a result using Vim-style keys, and listen without leaving the terminal.
 
-It is deliberately small: OpenTune streams audio; it does not download songs, require a browser, require a YouTube account, or maintain a media library. Playback happens in a full-screen terminal UI (TUI).
+It is deliberately small: OpenTune streams audio, with optional local downloads,
+and does not require a browser, YouTube account, or separate media library.
+Playback happens in a full-screen terminal UI (TUI).
 
 ## What it can do
 
@@ -15,6 +17,9 @@ It is deliberately small: OpenTune streams audio; it does not download songs, re
 - Create persistent playlists in a right-side terminal pane
 - Download tracks to a pinned local Downloads playlist
 - Search and edit playlist contents without affecting the playback queue
+- Mark contiguous songs with visual mode (`v`) for bulk queue/playlist actions
+- Prefer downloaded local files automatically when a matching song is played
+- Loop an entire open playlist with `o`
 - Display the playing title, elapsed time, total duration, and playback state
 
 ## How it works
@@ -27,7 +32,8 @@ OpenTune coordinates two established command-line programs:
 4. OpenTune controls `mpv` through a private local socket, so pause, seek, loop, and progress updates work while the TUI remains open.
 5. In the background, OpenTune asks YouTube for its radio/mix playlist seeded by the selected video, then filters alternate uploads of the same song before filling the queue. If YouTube does not expose a radio playlist, OpenTune falls back to other songs from the selected artist.
 
-Nothing is downloaded or uploaded by OpenTune. Search, stream playback, and mix generation need an active internet connection.
+Search, first-time stream playback, and mix generation need an active internet
+connection. `Ctrl-d` optionally saves audio locally for offline playback.
 
 ## Requirements
 
@@ -186,7 +192,7 @@ opentune --help
 | `j` or `↓` | Move selection down in Results or Queue |
 | `k` or `↑` | Move selection up in Results or Queue |
 | `Enter` | Play the selected result or queue item |
-| `Space` | Pause or resume playback |
+| `Space` | Pause or resume playback from any window |
 | `h` | Play the previous track, if there is one |
 | `l` | Play the next queued track |
 | `H` (`Shift+h`) | Rewind 10 seconds |
@@ -195,7 +201,8 @@ opentune --help
 | `Tab` | Switch between **Results** and **Queue** |
 | `/` | Open a search prompt |
 | `a` | Append the selected search result to the Queue without playing it |
-| `d` | Delete the selected track from the Queue |
+| `v` | Enter/leave visual selection; extend the selection with `j`/`k` |
+| `d` | Delete the selected track(s) from the Queue |
 | `c` | Clear the Queue |
 | `u` | Undo the last queue deletion or clear |
 | `Ctrl-r` | Redo the last undone queue deletion or clear |
@@ -259,7 +266,6 @@ Downloaded audio files are stored in:
 | `p` | Pin/unpin the focused playlist (Downloads is always pinned) |
 | `r` | Rename the focused playlist (`Downloads` cannot be renamed) |
 | `D` | Delete the focused playlist after confirmation (`Downloads` is protected) |
-| `Ctrl-d` | Download the focused song when a playlist is open |
 | `P` | Toggle the pane |
 | `Ctrl-h` / `Ctrl-l` | Focus the main / Playlists pane |
 
@@ -268,15 +274,21 @@ Downloaded audio files are stored in:
 | Key | Action |
 | --- | --- |
 | `j` / `k` | Move through songs |
+| `v` | Enter/leave visual selection; extend the selection with `j`/`k` |
 | `Enter` | Play the focused song and load the playlist into the temporary queue |
 | `h` | Leave the current playlist and return to the playlist list |
 | `a` | Append the focused song to the temporary Queue without playing it |
 | `f` | Search the current playlist by title or uploader |
-| `D` (`Shift+d`) | Permanently delete the focused song after confirmation |
+| `D` (`Shift+d`) | Permanently delete the focused song(s) after confirmation |
+| `o` | Toggle looping of the current playlist |
 | `P` | Toggle the pane without closing the playlist |
 
 Playlist song deletion has no undo/redo. A deleted song must be added again
 with `p<N>` from a main-window search result or queue item.
+
+Visual mode (`v`) makes `j`/`k` extend a contiguous selection. Actions such as
+queue append/delete, playlist append, and playlist deletion apply to every
+selected song. Press `v` again to leave visual mode.
 
 ### Adding tracks to a playlist
 
@@ -305,7 +317,9 @@ The queue is kept in memory for the current session only. It is cleared when Ope
 `Ctrl-o` loops the currently playing track from either the main window or the
 Playlists window. The screen header displays `LOOP` while it is enabled. Turn
 it off with `Ctrl-o` again; then, when a track ends, OpenTune advances to the
-next item in the queue. `Ctrl-l` is reserved for focusing the Playlists pane.
+next item in the queue. In an open playlist, `o` loops the whole playlist and
+shows `PLOOP` in the header; it starts the playlist again after its final song.
+`Ctrl-l` is reserved for focusing the Playlists pane.
 
 ## Troubleshooting
 
@@ -350,7 +364,9 @@ opentune/
 
 ## Current scope and limitations
 
-OpenTune v1 is a streaming player. It does not yet provide persistent playlists, saved favorites, downloads, lyrics, volume controls, or system media-key integration. These are good candidates for later releases, but the current goal is fast terminal search and playback with a lightweight mix queue.
+OpenTune currently provides persistent playlists and optional downloads. Lyrics,
+volume controls, and system media-key integration remain outside the current
+scope.
 
 ## License
 

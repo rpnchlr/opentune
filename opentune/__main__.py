@@ -15,7 +15,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
@@ -47,14 +47,15 @@ Main window keys:
   j / Down       Select next result or queue track
   k / Up         Select previous result or queue track
   Enter          Play the selected track
-  Space          Pause or resume
+  Space          Pause or resume (works from any window)
   h / l          Previous / next track
   H / L          Rewind / forward 10 seconds
   Ctrl-o         Toggle looping for the current track (any window)
   Tab            Switch between Results and Queue
   /              Search YouTube from inside OpenTune
   a              Append the selected search result to the Queue
-  d              Delete the selected track from the Queue
+  v              Start/stop visual selection; extend with j/k
+  d              Delete selected track(s) from the Queue
   c              Clear the Queue
   u              Undo the last queue delete/clear
   Ctrl-r         Redo the last undone queue delete/clear
@@ -74,19 +75,22 @@ Playlists window keys:
   p              Pin/unpin the focused playlist (playlist list only)
   r              Rename the focused playlist
   f              Search the open playlist
-  D              Delete selected song, or focused playlist (confirm first)
+  D              Delete selected song(s), or focused playlist (confirm first)
   Ctrl-d         Download the focused song (open playlist only)
   Ctrl-o         Toggle looping (works from any window)
+  o              Toggle looping of the open playlist
+  v              Start/stop visual selection; extend with j/k
   P              Toggle the Playlists window
 
 Playlist notes:
   Downloads has no user-playlist index. p<N> targets user playlists only.
   Pinned user playlists stay above unpinned playlists.
   Esc only cancels prompts and closes the help overlay; it never quits.
-  Undo/redo do not apply to playlist song changes.
+  Visual selections support bulk queue/playlist operations. Undo/redo do not
+  apply to playlist song changes.
 
-OpenTune requires mpv and yt-dlp. It streams audio only and does not
-download tracks. Selecting a result creates a YouTube radio-style mix,
+OpenTune requires mpv and yt-dlp. It streams audio and optionally downloads
+tracks with Ctrl-d. Selecting a result creates a YouTube radio-style mix,
 shown in the Queue tab. Only music-like results are kept; use `a` to append
 a search result without starting it."""
 
@@ -317,6 +321,7 @@ class QueueAction:
     index: int = 0
     track: Track | None = None
     tracks: tuple[Track, ...] = ()
+    indices: tuple[int, ...] = ()
 
 
 class Player:
@@ -325,6 +330,9 @@ class Player:
         self.queue: list[Track] = []
         self.history: list[Track] = []
         self.loop = False
+        self.playlist_loop = False
+        self.playlist_tracks: list[Track] = []
+        self.track_resolver: Callable[[Track], Track] | None = None
         self.message = "Ready. Press / to search."
         self.playback_failed = False
         self._queue_undo: list[QueueAction] = []
@@ -332,8 +340,15 @@ class Player:
         self._lock = threading.Lock()
         self.mpv = MPV(self._finished, self._playback_error)
 
+    def resolve_track(self, track: Track) -> Track:
+        return self.track_resolver(track) if self.track_resolver else track
+
     def start(self, track: Track, *, build_mix: bool = True, remember_current: bool = True) -> None:
+        track = self.resolve_track(track)
         with self._lock:
+            if build_mix:
+                self.playlist_loop = False
+                self.playlist_tracks = []
             if remember_current and self.current and self.current.url != track.url:
                 self.history.append(self.current)
             self.current = track
@@ -380,6 +395,7 @@ class Player:
         self.start(next_track, build_mix=False)
 
     def enqueue(self, track: Track) -> bool:
+        track = self.resolve_track(track)
         with self._lock:
             existing_urls = {item.url for item in self.queue}
             existing_keys = {YouTube._track_key(item) for item in self.queue}
@@ -401,6 +417,18 @@ class Player:
             self._queue_redo.clear()
             self.message = f"Removed from Queue: {removed.title}"
             return removed
+
+    def remove_queue_indices(self, indices: list[int]) -> int:
+        with self._lock:
+            valid = sorted({index for index in indices if 0 <= index < len(self.queue)})
+            if not valid:
+                return 0
+            removed = tuple(self.queue[index] for index in valid)
+            self.queue = [track for index, track in enumerate(self.queue) if index not in set(valid)]
+            self._queue_undo.append(QueueAction("delete_many", tracks=removed, indices=tuple(valid)))
+            self._queue_redo.clear()
+            self.message = f"Removed {len(removed)} tracks from Queue"
+            return len(removed)
 
     def clear_queue(self) -> int:
         with self._lock:
@@ -429,6 +457,10 @@ class Player:
             if action.kind == "delete" and action.track is not None:
                 self.queue.insert(min(action.index, len(self.queue)), action.track)
                 self.message = f"Undo: restored {action.track.title}"
+            elif action.kind == "delete_many":
+                for index, track in zip(action.indices, action.tracks):
+                    self.queue.insert(min(index, len(self.queue)), track)
+                self.message = f"Undo: restored {len(action.tracks)} queue tracks"
             elif action.kind == "clear":
                 self.queue[0:0] = list(action.tracks)
                 self.message = f"Undo: restored {len(action.tracks)} queue tracks"
@@ -451,6 +483,10 @@ class Player:
                             self.queue.pop(candidate_index)
                             break
                 self.message = f"Redo: removed {action.track.title}"
+            elif action.kind == "delete_many":
+                urls = {track.url for track in action.tracks}
+                self.queue = [track for track in self.queue if track.url not in urls]
+                self.message = f"Redo: removed {len(action.tracks)} queue tracks"
             elif action.kind == "clear":
                 self.queue.clear()
                 self.message = "Redo: cleared Queue"
@@ -469,8 +505,15 @@ class Player:
         self.start(previous_track, build_mix=False, remember_current=False)
 
     def _finished(self) -> None:
-        if not self.loop:
+        if self.loop:
+            return
+        if self.playlist_loop and not self.queue and self.playlist_tracks:
+            current_url = self.current.url if self.current else ""
+            self.queue = [track for track in self.playlist_tracks if track.url != current_url]
+        if self.queue:
             self.next()
+        elif self.playlist_loop and self.current:
+            self.start(self.current, build_mix=False)
 
     def toggle_loop(self) -> None:
         self.loop = not self.loop
@@ -484,9 +527,15 @@ class Player:
     def replace_queue(self, tracks: list[Track], current: Track | None = None) -> None:
         with self._lock:
             current_url = current.url if current else ""
-            self.queue = [track for track in tracks if track.url != current_url]
+            self.queue = [self.resolve_track(track) for track in tracks if track.url != current_url]
             self._queue_redo.clear()
             self.message = f"Playlist loaded: {len(self.queue) + (1 if current else 0)} tracks"
+
+    def set_playlist_loop(self, tracks: list[Track], enabled: bool) -> None:
+        with self._lock:
+            self.playlist_loop = enabled
+            self.playlist_tracks = [self.resolve_track(track) for track in tracks] if enabled else []
+            self.message = f"Playlist loop {'on' if enabled else 'off'}"
 
 
 @dataclass
@@ -608,6 +657,21 @@ class PlaylistStore:
     def get_user(self, index: int) -> Playlist | None:
         playlists = self.user_playlists()
         return playlists[index] if 0 <= index < len(playlists) else None
+
+    def resolve_track(self, track: Track) -> Track:
+        """Attach a downloaded local path to matching playlist/search metadata."""
+        downloaded = next(
+            (item for item in self.get(0).tracks if item.url == track.url),
+            None,
+        ) if self.get(0) else None
+        if not downloaded or not downloaded.local_path or not Path(downloaded.local_path).is_file():
+            return track
+        if track.local_path == downloaded.local_path:
+            return track
+        return Track(track.title, track.url, track.duration, track.uploader, downloaded.local_path)
+
+    def is_downloaded(self, track: Track) -> bool:
+        return bool(self.resolve_track(track).local_path)
 
     def create(self, name: str = "") -> Playlist:
         name = name.strip()
@@ -803,7 +867,7 @@ class TUI:
         title = current.title if current else "Nothing playing"
         duration = current.duration if current else 0
         mode = "ERROR" if current and self.player.playback_failed else "PAUSED" if paused else "PLAYING" if current else "IDLE"
-        loop = " LOOP" if self.player.loop else ""
+        loop = " LOOP" if self.player.loop else " PLOOP" if self.player.playlist_loop else ""
         self.screen.addnstr(0, 1, f" OPENTUNE  ·  {mode}{loop}", width - 2, curses.A_BOLD)
         self.screen.hline(1, 0, curses.ACS_HLINE, width)
         self.screen.addnstr(2, 2, self.clipped(title, width - 4), width - 4, curses.A_BOLD)
@@ -930,6 +994,7 @@ class PlaylistTUI:
 
     def __init__(self, screen: curses.window, player: Player, store: PlaylistStore, initial_query: str = "") -> None:
         self.screen, self.player, self.store = screen, player, store
+        self.player.track_resolver = self.store.resolve_track
         self.results: list[Track] = []
         self.result_index = 0
         self.queue_index = 0
@@ -942,6 +1007,8 @@ class PlaylistTUI:
         self.active_playlist_id: str | None = None
         self.playlist_track_index = 0
         self.playlist_search = ""
+        self.visual_mode = False
+        self.visual_anchor: tuple[str, int] | None = None
         curses.curs_set(0)
         screen.nodelay(True)
         screen.keypad(True)
@@ -1034,14 +1101,13 @@ class PlaylistTUI:
         if playlist is None:
             self.player.message = "Invalid playlist number"
             return
-        track = self.focused_main_track()
-        if track is None:
+        tracks = self.focused_main_tracks()
+        if not tracks:
             self.player.message = "Select a search result or queue track first"
             return
-        if self.store.add_track(playlist, track):
-            self.player.message = f"Added to playlist {index + 1}: {playlist.name}"
-        else:
-            self.player.message = f"Track already exists in {playlist.name}"
+        added = sum(self.store.add_track(playlist, track) for track in tracks)
+        self.clear_visual()
+        self.player.message = f"Added {added} track(s) to playlist {index + 1}: {playlist.name}"
 
     def prompt_confirm(self, message: str) -> bool:
         height, width = self.screen.getmaxyx()
@@ -1063,6 +1129,13 @@ class PlaylistTUI:
         if self.tab == 1 and self.player.queue:
             return self.player.queue[self.queue_index]
         return None
+
+    def focused_main_tracks(self) -> list[Track]:
+        if self.tab == 0:
+            indices = self.selected_indices_for("main")
+            return [self.results[index] for index in sorted(indices) if 0 <= index < len(self.results)]
+        indices = self.selected_indices_for("main")
+        return [self.player.queue[index] for index in sorted(indices) if 0 <= index < len(self.player.queue)]
 
     def current_playlist(self) -> Playlist | None:
         if self.active_playlist_id is None:
@@ -1086,6 +1159,18 @@ class PlaylistTUI:
         index, track = visible[self.playlist_track_index]
         return playlist, index, track
 
+    def selected_playlist_tracks(self) -> list[tuple[Playlist, int, Track]]:
+        playlist = self.current_playlist()
+        if playlist is None:
+            return []
+        visible = self.visible_playlist_tracks(playlist)
+        indices = self.selected_indices_for("playlists")
+        return [
+            (playlist, original_index, track)
+            for visible_index, (original_index, track) in enumerate(visible)
+            if visible_index in indices
+        ]
+
     def draw_track_list(self, items: list[Track], selected: int, top: int, height: int, left: int, width: int, focus_name: str = "main") -> None:
         if not items:
             self.screen.addnstr(top, left + 1, "Nothing here yet.", max(1, width - 2), curses.A_DIM)
@@ -1093,18 +1178,55 @@ class PlaylistTUI:
         start = max(0, min(selected - height + 1, len(items) - height))
         for line, index in enumerate(range(start, min(len(items), start + height))):
             item = items[index]
-            marker = "›" if index == selected else " "
-            text = f"{marker} {index + 1:2}. {item.label}  [{format_time(item.duration)}]"
-            attr = curses.A_REVERSE if index == selected and self.focus == focus_name else curses.A_NORMAL
+            selected_indices = self.selected_indices_for(focus_name)
+            marker = "*" if index in selected_indices else "›" if index == selected else " "
+            downloaded = " [d]" if self.store.is_downloaded(item) else ""
+            text = f"{marker} {index + 1:2}. {item.label}{downloaded}  [{format_time(item.duration)}]"
+            attr = curses.A_REVERSE if (index == selected and self.focus == focus_name) else curses.A_DIM if index in selected_indices else curses.A_NORMAL
             self.screen.addnstr(top + line, left + 1, self.clipped(text, width - 2), max(1, width - 2), attr)
+
+    def selection_context(self, focus_name: str | None = None) -> str:
+        if focus_name == "playlists":
+            return "playlist"
+        if focus_name == "main":
+            return "results" if self.tab == 0 else "queue"
+        if self.active_playlist_id is not None:
+            return "playlist"
+        return "results" if self.tab == 0 else "queue"
+
+    def selected_indices_for(self, focus_name: str = "main") -> set[int]:
+        context = self.selection_context(focus_name)
+        if not self.visual_mode or not self.visual_anchor or self.visual_anchor[0] != context:
+            if context == "playlist":
+                return {self.playlist_track_index}
+            return {self.result_index if context == "results" else self.queue_index}
+        start = self.visual_anchor[1]
+        end = self.playlist_track_index if context == "playlist" else self.result_index if context == "results" else self.queue_index
+        return set(range(min(start, end), max(start, end) + 1))
+
+    def clear_visual(self) -> None:
+        self.visual_mode = False
+        self.visual_anchor = None
+
+    def toggle_visual(self, context: str) -> None:
+        if self.visual_mode:
+            self.clear_visual()
+            self.player.message = "Selection mode off"
+            return
+        index = self.playlist_track_index if context == "playlist" else self.result_index if context == "results" else self.queue_index
+        self.visual_mode = True
+        self.visual_anchor = (context, index)
+        self.player.message = "Selection mode on: move with j/k, operate on selected tracks"
 
     def draw_main(self, width: int) -> None:
         height, _ = self.screen.getmaxyx()
         current = self.player.current
         position, paused = self.player.mpv.state() if current else (0, False)
         title = current.title if current else "Nothing playing"
+        if current and self.store.is_downloaded(current):
+            title += " [d]"
         mode = "ERROR" if current and self.player.playback_failed else "PAUSED" if paused else "PLAYING" if current else "IDLE"
-        loop = " LOOP" if self.player.loop else ""
+        loop = " LOOP" if self.player.loop else " PLOOP" if self.player.playlist_loop else ""
         self.screen.addnstr(0, 1, f" OPENTUNE  ·  {mode}{loop}", max(1, width - 2), curses.A_BOLD)
         self.screen.hline(1, 0, curses.ACS_HLINE, width)
         self.screen.addnstr(2, 2, self.clipped(title, width - 4), max(1, width - 4), curses.A_BOLD)
@@ -1127,19 +1249,19 @@ class PlaylistTUI:
     def draw_help(self, top: int, width: int, height: int) -> None:
         lines = [
             "MAIN WINDOW",
-            "j/k move · Enter play · Space pause · h/l prev/next",
+            "j/k move · v select · Enter play · Space pause anywhere",
             "H/L seek · Ctrl-o loop · Tab Results/Queue · / search",
-            "a append · d delete queue · c clear · u undo · Ctrl-r redo",
+            "a append · d bulk-delete queue · c clear · u undo · Ctrl-r redo",
             "p<N> add focused track to user playlist · Ctrl-d download",
             "Ctrl-o loop anywhere · P toggle playlists · Ctrl-h/l focus panes",
             "q quit",
             "",
             "PLAYLISTS WINDOW",
             "j/k move · l enter · h leave · Enter play",
-            "a create (list) / append song (open) · r rename · f find",
+            "a create (list) / append selected (open) · v select",
             "p pin/unpin playlist (list only) · D delete song or playlist",
             "D always asks for confirmation; Downloads cannot be deleted",
-            "Ctrl-d download · Ctrl-o loop · P toggle pane · ? close help",
+            "o playlist loop · Ctrl-d download · Ctrl-o loop · P toggle pane",
         ]
         for index, line in enumerate(lines[:height]):
             attr = curses.A_BOLD if index in (0, 7) else curses.A_NORMAL
@@ -1210,12 +1332,14 @@ class PlaylistTUI:
             self.active_playlist_id = playlist.id
             self.playlist_track_index = 0
             self.playlist_search = ""
+            self.clear_visual()
 
     def leave_playlist(self) -> None:
         if self.active_playlist_id is None:
             return
         self.active_playlist_id = None
         self.playlist_search = ""
+        self.clear_visual()
 
     def play_playlist_track(self) -> None:
         if self.active_playlist_id is None:
@@ -1224,6 +1348,7 @@ class PlaylistTUI:
         if selected is None:
             return
         playlist, _, track = selected
+        self.player.set_playlist_loop(playlist.tracks, self.player.playlist_loop)
         self.player.replace_queue(playlist.tracks, track)
         self.queue_index = 0
         self.player.start(track, build_mix=False)
@@ -1289,16 +1414,20 @@ class PlaylistTUI:
         self.player.message = f"Found {len(self.visible_playlist_tracks(self.current_playlist()))} matching songs"
 
     def delete_playlist_track(self) -> None:
-        selected = self.playlist_track()
-        if selected is None:
+        selected = self.selected_playlist_tracks()
+        if not selected:
             return
-        playlist, index, track = selected
-        if not self.prompt_confirm(f"Do you want to delete '{track.title}'?"):
+        playlist = selected[0][0]
+        count = len(selected)
+        prompt = f"Do you want to delete {count} selected song(s)?" if count > 1 else f"Do you want to delete '{selected[0][2].title}'?"
+        if not self.prompt_confirm(prompt):
             self.player.message = "Deletion cancelled"
             return
-        self.store.remove_track(playlist, index)
-        self.playlist_track_index = max(0, self.playlist_track_index - 1)
-        self.player.message = f"Permanently removed {track.title}"
+        for _, index, _ in sorted(selected, key=lambda item: item[1], reverse=True):
+            self.store.remove_track(playlist, index)
+        self.playlist_track_index = max(0, min(self.playlist_track_index, len(self.visible_playlist_tracks(playlist)) - 1))
+        self.clear_visual()
+        self.player.message = f"Permanently removed {count} song(s)"
 
     def download_track(self, track: Track) -> None:
         downloads = self.store.get(0)
@@ -1334,15 +1463,23 @@ class PlaylistTUI:
             self.player.message = "Open a playlist and select a song first"
             return
         _, _, track = selected
-        self.download_track(track)
+        self.download_track(self.store.resolve_track(track))
 
     def enqueue_playlist_track(self) -> None:
-        selected = self.playlist_track()
-        if selected is None:
+        selected = self.selected_playlist_tracks()
+        if not selected:
             self.player.message = "Select a song in the open playlist first"
             return
-        _, _, track = selected
-        self.player.enqueue(track)
+        added = sum(self.player.enqueue(track) for _, _, track in selected)
+        self.clear_visual()
+        self.player.message = f"Added {added} song(s) to Queue"
+
+    def toggle_playlist_loop(self) -> None:
+        playlist = self.current_playlist()
+        if playlist is None:
+            self.player.message = "Open a playlist to toggle playlist looping"
+            return
+        self.player.set_playlist_loop(playlist.tracks, not self.player.playlist_loop)
 
     def handle_main(self, key: int) -> None:
         if key == ord("q"):
@@ -1373,15 +1510,18 @@ class PlaylistTUI:
             self.player.toggle_loop()
         elif key == 9:
             self.tab = 1 - self.tab
+            self.clear_visual()
         elif key == ord("/"):
             self.prompt_search()
         elif key == ord("a"):
-            track = self.focused_main_track()
-            if track:
-                self.player.enqueue(track)
+            tracks = self.focused_main_tracks()
+            added = sum(self.player.enqueue(track) for track in tracks)
+            self.clear_visual()
+            self.player.message = f"Added {added} song(s) to Queue"
         elif key == ord("d") and self.tab == 1:
-            self.player.remove_queue_at(self.queue_index)
+            self.player.remove_queue_indices(sorted(self.selected_indices_for("main")))
             self.queue_index = max(0, min(self.queue_index, len(self.player.queue) - 1))
+            self.clear_visual()
         elif key == ord("c"):
             self.player.clear_queue()
             self.queue_index = 0
@@ -1391,6 +1531,8 @@ class PlaylistTUI:
             self.player.redo_queue_action()
         elif key == ord("p"):
             self.prompt_playlist_number()
+        elif key == ord("v"):
+            self.toggle_visual("results" if self.tab == 0 else "queue")
         elif key == 4:
             self.download_current()
 
@@ -1412,6 +1554,10 @@ class PlaylistTUI:
                 self.create_playlist()
             else:
                 self.enqueue_playlist_track()
+        elif key == ord("v") and self.active_playlist_id is not None:
+            self.toggle_visual("playlist")
+        elif key == ord("o") and self.active_playlist_id is not None:
+            self.toggle_playlist_loop()
         elif key == ord("r"):
             self.rename_playlist()
         elif key == ord("f"):
@@ -1429,6 +1575,9 @@ class PlaylistTUI:
             self.showing_help = True
 
     def handle(self, key: int) -> None:
+        if key == ord(" "):
+            self.player.mpv.toggle_pause()
+            return
         if key == 15:
             self.player.toggle_loop()
             return

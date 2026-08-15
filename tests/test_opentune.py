@@ -79,6 +79,40 @@ class OpenTuneTests(unittest.TestCase):
         self.assertEqual(player.queue, [])
         player.close()
 
+    def test_bulk_queue_delete_has_one_undo_action(self):
+        from opentune.__main__ import Player
+
+        player = Player()
+        player.mpv.play = lambda track, loop=False: None
+        tracks = [Track(f"Song {index}", f"https://www.youtube.com/watch?v={index}") for index in range(4)]
+        for track in tracks:
+            player.enqueue(track)
+        self.assertEqual(player.remove_queue_indices([1, 3]), 2)
+        self.assertEqual(player.queue, [tracks[0], tracks[2]])
+        self.assertTrue(player.undo_queue_action())
+        self.assertEqual(player.queue, tracks)
+        self.assertTrue(player.redo_queue_action())
+        self.assertEqual(player.queue, [tracks[0], tracks[2]])
+        player.close()
+
+    def test_playlist_loop_repopulates_queue_after_last_track(self):
+        from opentune.__main__ import Player
+
+        player = Player()
+        played = []
+        player.mpv.play = lambda track, loop=False: played.append(track)
+        first = Track("First", "https://www.youtube.com/watch?v=first")
+        second = Track("Second", "https://www.youtube.com/watch?v=second")
+        player.set_playlist_loop([first, second], True)
+        player.current = first
+        player.queue = [second]
+        player._finished()
+        self.assertEqual(player.current, second)
+        player._finished()
+        self.assertEqual(player.current, first)
+        self.assertEqual(played, [second, first])
+        player.close()
+
     def test_failed_mpv_does_not_advance_queue(self):
         class FakeProcess:
             returncode = 1
@@ -136,6 +170,19 @@ class OpenTuneTests(unittest.TestCase):
             self.assertIs(store.get_user(1), second)
             self.assertIsNone(store.get_user(2))
 
+    def test_downloaded_track_resolves_to_local_path_for_offline_playback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Playlists"
+            local_file = Path(directory) / "saved.mp3"
+            local_file.write_bytes(b"audio")
+            store = PlaylistStore(root)
+            downloaded = Track("Saved", "https://www.youtube.com/watch?v=saved", local_path=str(local_file))
+            self.assertTrue(store.add_download(downloaded))
+            metadata = Track("Saved", downloaded.url)
+            resolved = store.resolve_track(metadata)
+            self.assertEqual(resolved.local_path, str(local_file))
+            self.assertTrue(store.is_downloaded(metadata))
+
     def test_playlist_pinning_and_deletion(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "Playlists"
@@ -161,6 +208,16 @@ class OpenTuneTests(unittest.TestCase):
         class StubPlayer:
             def __init__(self):
                 self.loop_toggles = 0
+                self.pause_toggles = 0
+
+                class MPVStub:
+                    def __init__(self, owner):
+                        self.owner = owner
+
+                    def toggle_pause(self):
+                        self.owner.pause_toggles += 1
+
+                self.mpv = MPVStub(self)
 
             def toggle_loop(self):
                 self.loop_toggles += 1
@@ -198,6 +255,8 @@ class OpenTuneTests(unittest.TestCase):
             tui.focus = "playlists"
             tui.handle(15)
             self.assertEqual(tui.player.loop_toggles, 3)
+            tui.handle(ord(" "))
+            self.assertEqual(tui.player.pause_toggles, 1)
 
     def test_ctrl_d_downloads_focused_open_playlist_song(self):
         class StubPlayer:
@@ -255,7 +314,31 @@ class OpenTuneTests(unittest.TestCase):
             tui.active_playlist_id = playlist.id
             tui.playlist_track_index = 0
             tui.playlist_search = ""
+            tui.visual_mode = False
+            tui.visual_anchor = None
 
             tui.handle_playlists(ord("a"))
 
             self.assertEqual(tui.player.queue, [track])
+
+    def test_visual_selection_collects_contiguous_tracks(self):
+        class StubPlayer:
+            def __init__(self):
+                self.queue = []
+                self.message = ""
+
+            def enqueue(self, track):
+                self.queue.append(track)
+                return True
+
+        tui = PlaylistTUI.__new__(PlaylistTUI)
+        tui.player = StubPlayer()
+        tui.results = [Track(f"Song {index}", f"https://example.test/{index}") for index in range(4)]
+        tui.result_index = 1
+        tui.queue_index = 0
+        tui.tab = 0
+        tui.visual_mode = False
+        tui.visual_anchor = None
+        tui.toggle_visual("results")
+        tui.result_index = 3
+        self.assertEqual(tui.focused_main_tracks(), tui.results[1:4])
