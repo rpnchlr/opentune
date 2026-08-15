@@ -113,6 +113,22 @@ class OpenTuneTests(unittest.TestCase):
         self.assertEqual(played, [second, first])
         player.close()
 
+    def test_finished_track_starts_next_queue_item_immediately(self):
+        from opentune.__main__ import Player
+
+        player = Player()
+        played = []
+        player.mpv.play = lambda track, loop=False: played.append(track)
+        first = Track("First", "https://www.youtube.com/watch?v=first")
+        second = Track("Second", "https://www.youtube.com/watch?v=second")
+        player.current = first
+        player.queue = [second]
+        player._finished()
+        self.assertIs(player.current, second)
+        self.assertEqual(played, [second])
+        self.assertFalse(player.playback_failed)
+        player.close()
+
     def test_failed_mpv_does_not_advance_queue(self):
         class FakeProcess:
             returncode = 1
@@ -131,6 +147,24 @@ class OpenTuneTests(unittest.TestCase):
         mpv._watch(process)
         self.assertEqual(finished, [])
         self.assertEqual(errors, ["network error"])
+
+    def test_normal_mpv_exit_dispatches_finished_callback(self):
+        class FakeProcess:
+            returncode = 0
+            stderr = io.StringIO("")
+
+            def wait(self):
+                return self.returncode
+
+        mpv = MPV.__new__(MPV)
+        finished = []
+        mpv._intentional_stop = False
+        mpv.process = process = FakeProcess()
+        mpv._on_finished = lambda: finished.append(True)
+        mpv._on_error = lambda message: None
+        mpv._watch(process)
+        self.assertEqual(finished, [True])
+        self.assertIsNone(mpv.process)
 
     def test_playlists_persist_and_default_names_are_numbered(self):
         with tempfile.TemporaryDirectory() as directory:

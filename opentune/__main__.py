@@ -241,7 +241,8 @@ class MPV:
         self._on_finished = on_finished
         self._on_error = on_error
         self._directory = tempfile.TemporaryDirectory(prefix="opentune-")
-        self.socket_path = str(Path(self._directory.name) / "mpv.sock")
+        self._socket_number = 0
+        self.socket_path = str(Path(self._directory.name) / "mpv-0.sock")
         self.process: subprocess.Popen[str] | None = None
         self._intentional_stop = False
         self._lock = threading.Lock()
@@ -249,6 +250,9 @@ class MPV:
     def play(self, track: Track, loop: bool = False) -> None:
         self.stop()
         self._intentional_stop = False
+        self._socket_number += 1
+        socket_path = Path(self._directory.name) / f"mpv-{self._socket_number}.sock"
+        self.socket_path = str(socket_path)
         command = [
             "mpv", "--no-video", "--force-window=no", "--really-quiet",
             f"--input-ipc-server={self.socket_path}", "--ytdl-format=bestaudio/best", track.source,
@@ -256,14 +260,19 @@ class MPV:
         if loop:
             command.insert(-1, "--loop-file=inf")
         self.process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        threading.Thread(target=self._watch, args=(self.process,), daemon=True).start()
+        threading.Thread(target=self._watch, args=(self.process, self.socket_path), daemon=True).start()
 
-    def _watch(self, process: subprocess.Popen[str]) -> None:
+    def _watch(self, process: subprocess.Popen[str], socket_path: str | None = None) -> None:
         return_code = process.wait()
         error_text = (process.stderr.read().strip() if process.stderr else "")
         is_current = process is self.process
         if is_current:
             self.process = None
+        if socket_path:
+            try:
+                Path(socket_path).unlink(missing_ok=True)
+            except OSError:
+                pass
         if not self._intentional_stop and is_current:
             if return_code == 0:
                 self._on_finished()
@@ -309,6 +318,10 @@ class MPV:
             except subprocess.TimeoutExpired:
                 self.process.kill()
         self.process = None
+        try:
+            Path(self.socket_path).unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def close(self) -> None:
         self.stop()
