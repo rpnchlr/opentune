@@ -376,3 +376,69 @@ class OpenTuneTests(unittest.TestCase):
         tui.toggle_visual("results")
         tui.result_index = 3
         self.assertEqual(tui.focused_main_tracks(), tui.results[1:4])
+
+    def test_escape_cancels_visual_selection(self):
+        class StubPlayer:
+            message = ""
+
+            class MPVStub:
+                def toggle_pause(self):
+                    pass
+
+            mpv = MPVStub()
+
+        tui = PlaylistTUI.__new__(PlaylistTUI)
+        tui.player = StubPlayer()
+        tui.running = True
+        tui.panel_open = False
+        tui.showing_help = False
+        tui.focus = "main"
+        tui.visual_mode = True
+        tui.visual_anchor = ("results", 1)
+        tui.handle(27)
+        self.assertFalse(tui.visual_mode)
+        self.assertIsNone(tui.visual_anchor)
+        self.assertEqual(tui.player.message, "Visual selection cancelled")
+
+    def test_playlist_shuffle_changes_queue_only(self):
+        from opentune.__main__ import Player
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = PlaylistStore(Path(directory) / "Playlists")
+            playlist = store.create("Mix")
+            tracks = [Track(f"Song {index}", f"https://www.youtube.com/watch?v={index}") for index in range(3)]
+            for track in tracks:
+                store.add_track(playlist, track)
+            player = Player()
+            player.mpv.play = lambda track, loop=False: None
+            tui = PlaylistTUI.__new__(PlaylistTUI)
+            tui.store = store
+            tui.player = player
+            tui.active_playlist_id = playlist.id
+            tui.visual_mode = False
+            tui.visual_anchor = None
+            tui.queue_index = 0
+            with patch("opentune.__main__.random.shuffle", side_effect=lambda values: values.reverse()):
+                tui.shuffle_playlist_queue()
+            self.assertEqual([track.url for track in playlist.tracks], [track.url for track in tracks])
+            self.assertEqual([track.url for track in player.queue], [track.url for track in reversed(tracks)])
+            player.close()
+
+    def test_list_edge_and_half_page_navigation(self):
+        class ScreenStub:
+            def getmaxyx(self):
+                return (30, 100)
+
+        class PlayerStub:
+            queue = [Track(str(index), str(index)) for index in range(20)]
+
+        tui = PlaylistTUI.__new__(PlaylistTUI)
+        tui.screen = ScreenStub()
+        tui.player = PlayerStub()
+        tui.tab = 1
+        tui.queue_index = 0
+        tui.results = []
+        tui.move_to_edge_main(bottom=True)
+        self.assertEqual(tui.queue_index, 19)
+        tui.move_main(-tui.half_page())
+        self.assertEqual(tui.queue_index, 9)

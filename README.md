@@ -191,6 +191,8 @@ opentune --help
 | --- | --- |
 | `j` or `↓` | Move selection down in Results or Queue |
 | `k` or `↑` | Move selection up in Results or Queue |
+| `g` / `G` | Jump to the top / bottom of the current list |
+| `Ctrl-b` / `Ctrl-f` | Move half a page up / down |
 | `Enter` | Play the selected result or queue item |
 | `Space` | Pause or resume playback from any window |
 | `h` | Play the previous track, if there is one |
@@ -211,7 +213,7 @@ opentune --help
 | `P` | Toggle the Playlists pane |
 | `Ctrl-h` / `Ctrl-l` | Focus the main / Playlists pane when it is open |
 | `?` | Open/close the in-player key reference |
-| `Esc` in a prompt | Cancel search, playlist creation, rename, or confirmation |
+| `Esc` in a prompt or visual mode | Cancel the prompt or visual selection |
 | `Esc` in help | Close the help overlay |
 | `q` | Quit OpenTune (the only quit key) |
 
@@ -261,6 +263,8 @@ Downloaded audio files are stored in:
 | Key | Action |
 | --- | --- |
 | `j` / `k` | Move down/up through playlists |
+| `g` / `G` | Jump to the top / bottom of the playlist list |
+| `Ctrl-b` / `Ctrl-f` | Move half a page up / down |
 | `l` | Enter the focused playlist |
 | `a` | Create a playlist; an empty name becomes `My Playlist #N` |
 | `p` | Pin/unpin the focused playlist (Downloads is always pinned) |
@@ -274,6 +278,8 @@ Downloaded audio files are stored in:
 | Key | Action |
 | --- | --- |
 | `j` / `k` | Move through songs |
+| `g` / `G` | Jump to the first / last song |
+| `Ctrl-b` / `Ctrl-f` | Move half a page up / down |
 | `v` | Enter/leave visual selection; extend the selection with `j`/`k` |
 | `Enter` | Play the focused song and load the playlist into the temporary queue |
 | `h` | Leave the current playlist and return to the playlist list |
@@ -281,12 +287,14 @@ Downloaded audio files are stored in:
 | `f` | Search the current playlist by title or uploader |
 | `D` (`Shift+d`) | Permanently delete the focused song(s) after confirmation |
 | `o` | Toggle looping of the current playlist |
+| `s` | Shuffle the playlist into the temporary Queue without changing its saved order |
 | `P` | Toggle the pane without closing the playlist |
 
 Playlist song deletion has no undo/redo. A deleted song must be added again
 with `p<N>` from a main-window search result or queue item.
 
-Visual mode (`v`) makes `j`/`k` extend a contiguous selection. Actions such as
+Visual mode (`v`) makes `j`/`k` extend a contiguous selection. Press `Esc` to
+cancel visual mode without changing anything. Actions such as
 queue append/delete, playlist append, and playlist deletion apply to every
 selected song. Press `v` again to leave visual mode.
 

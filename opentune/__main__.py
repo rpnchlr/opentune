@@ -4,6 +4,7 @@ import argparse
 import curses
 import json
 import os
+import random
 import shutil
 import socket
 import subprocess
@@ -46,6 +47,8 @@ Options:
 Main window keys:
   j / Down       Select next result or queue track
   k / Up         Select previous result or queue track
+  g / G           Jump to top / bottom of the current list
+  Ctrl-b / Ctrl-f Move half a page up / down
   Enter          Play the selected track
   Space          Pause or resume (works from any window)
   h / l          Previous / next track
@@ -80,6 +83,7 @@ Playlists window keys:
   Ctrl-o         Toggle looping (works from any window)
   o              Toggle looping of the open playlist
   v              Start/stop visual selection; extend with j/k
+  s              Shuffle the open playlist into the temporary Queue
   P              Toggle the Playlists window
 
 Playlist notes:
@@ -1262,7 +1266,8 @@ class PlaylistTUI:
     def draw_help(self, top: int, width: int, height: int) -> None:
         lines = [
             "MAIN WINDOW",
-            "j/k move · v select · Enter play · Space pause anywhere",
+            "j/k move · g/G top/bottom · Ctrl-b/f half-page",
+            "v select · Enter play · Space pause anywhere",
             "H/L seek · Ctrl-o loop · Tab Results/Queue · / search",
             "a append · d bulk-delete queue · c clear · u undo · Ctrl-r redo",
             "p<N> add focused track to user playlist · Ctrl-d download",
@@ -1270,11 +1275,12 @@ class PlaylistTUI:
             "q quit",
             "",
             "PLAYLISTS WINDOW",
-            "j/k move · l enter · h leave · Enter play",
+            "j/k move · g/G top/bottom · Ctrl-b/f half-page",
+            "l enter · h leave · Enter play · Esc cancel visual",
             "a create (list) / append selected (open) · v select",
             "p pin/unpin playlist (list only) · D delete song or playlist",
             "D always asks for confirmation; Downloads cannot be deleted",
-            "o playlist loop · Ctrl-d download · Ctrl-o loop · P toggle pane",
+            "o playlist loop · s shuffle Queue · Ctrl-d download · Ctrl-o loop",
         ]
         for index, line in enumerate(lines[:height]):
             attr = curses.A_BOLD if index in (0, 7) else curses.A_NORMAL
@@ -1328,6 +1334,45 @@ class PlaylistTUI:
             self.result_index = max(0, min(len(self.results) - 1, self.result_index + delta))
         else:
             self.queue_index = max(0, min(len(self.player.queue) - 1, self.queue_index + delta))
+
+    def half_page(self) -> int:
+        height, _ = self.screen.getmaxyx()
+        return max(1, (height - 10) // 2)
+
+    def move_to_edge_main(self, bottom: bool = False) -> None:
+        if self.tab == 0:
+            self.result_index = max(0, len(self.results) - 1) if bottom else 0
+        else:
+            self.queue_index = max(0, len(self.player.queue) - 1) if bottom else 0
+
+    def move_to_edge_playlists(self, bottom: bool = False) -> None:
+        if self.active_playlist_id is None:
+            self.playlist_index = max(0, len(self.store.all()) - 1) if bottom else 0
+        else:
+            count = len(self.visible_playlist_tracks(self.current_playlist()))
+            self.playlist_track_index = max(0, count - 1) if bottom else 0
+
+    def shuffle_playlist_queue(self) -> None:
+        playlist = self.current_playlist()
+        if playlist is None:
+            self.player.message = "Open a playlist to shuffle it into Queue"
+            return
+        tracks = [self.store.resolve_track(track) for track in playlist.tracks]
+        if len(tracks) < 2:
+            self.player.message = "Playlist needs at least two songs to shuffle"
+            return
+        current = self.player.current if self.player.current and any(
+            track.url == self.player.current.url for track in tracks
+        ) else None
+        remaining = [track for track in tracks if not current or track.url != current.url]
+        random.shuffle(remaining)
+        shuffled = ([current] if current else []) + remaining
+        self.player.replace_queue(shuffled, current)
+        if self.player.playlist_loop:
+            self.player.set_playlist_loop(shuffled, True)
+        self.queue_index = 0
+        self.clear_visual()
+        self.player.message = f"Shuffled {len(tracks)} songs into Queue"
 
     def move_playlists(self, delta: int) -> None:
         if self.active_playlist_id is None:
@@ -1497,6 +1542,14 @@ class PlaylistTUI:
     def handle_main(self, key: int) -> None:
         if key == ord("q"):
             self.running = False
+        elif key == ord("g"):
+            self.move_to_edge_main()
+        elif key == ord("G"):
+            self.move_to_edge_main(bottom=True)
+        elif key == 2:  # Ctrl-b
+            self.move_main(-self.half_page())
+        elif key == 6:  # Ctrl-f
+            self.move_main(self.half_page())
         elif key in (ord("j"), curses.KEY_DOWN):
             self.move_main(1)
         elif key in (ord("k"), curses.KEY_UP):
@@ -1552,6 +1605,14 @@ class PlaylistTUI:
     def handle_playlists(self, key: int) -> None:
         if key in (ord("q"),):
             self.running = False
+        elif key == ord("g"):
+            self.move_to_edge_playlists()
+        elif key == ord("G"):
+            self.move_to_edge_playlists(bottom=True)
+        elif key == 2:  # Ctrl-b
+            self.move_playlists(-self.half_page())
+        elif key == 6:  # Ctrl-f
+            self.move_playlists(self.half_page())
         elif key in (ord("j"), curses.KEY_DOWN):
             self.move_playlists(1)
         elif key in (ord("k"), curses.KEY_UP):
@@ -1571,6 +1632,8 @@ class PlaylistTUI:
             self.toggle_visual("playlist")
         elif key == ord("o") and self.active_playlist_id is not None:
             self.toggle_playlist_loop()
+        elif key == ord("s") and self.active_playlist_id is not None:
+            self.shuffle_playlist_queue()
         elif key == ord("r"):
             self.rename_playlist()
         elif key == ord("f"):
@@ -1588,6 +1651,10 @@ class PlaylistTUI:
             self.showing_help = True
 
     def handle(self, key: int) -> None:
+        if key == 27 and self.visual_mode:
+            self.clear_visual()
+            self.player.message = "Visual selection cancelled"
+            return
         if key == ord(" "):
             self.player.mpv.toggle_pause()
             return
