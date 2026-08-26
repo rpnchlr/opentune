@@ -216,7 +216,8 @@ opentune --help
 4. Press `Enter` to start the highlighted result.
 5. The title and time appear at the top of the screen.
 6. OpenTune prepares a YouTube radio-style mix in the background. Press `Tab` to view it in the **Queue** tab.
-7. Press `q` to quit. `Esc` only cancels an active prompt or closes the help overlay.
+7. Press `q` to quit. `Esc` cancels prompts/visual mode; press it twice quickly
+   inside a playlist to clear its find query.
 
 ## Keybinds
 
@@ -235,6 +236,7 @@ opentune --help
 | `Ctrl-o` | Toggle looping of the current track from any window |
 | `Tab` | Switch between **Results** and **Queue** |
 | `/` | Open a search prompt from any window |
+| `f` (Queue tab) | Find and highlight a song in the Queue without filtering it |
 | `Shift+h/l` or `Shift+Left/Right` | Rewind/forward 10 seconds from any window |
 | `a` | Append the focused result/queue track to the Queue without playing it |
 | `s` (Queue tab) | Shuffle only the temporary Queue; saved playlists are unchanged |
@@ -268,6 +270,7 @@ Selecting a search result starts a YouTube radio-style mix. OpenTune filters dup
 - Press `a` on a search result to append it without interrupting playback.
 - Press `d` to remove the highlighted queue item, or `c` to clear the whole queue.
 - Press `u` to undo the latest deletion/clear, or `Ctrl-r` to redo it.
+- Press `f` to find and highlight a queue song without changing the queue.
 - Use `Tab` to return to Results.
 
 Undo and redo are intentionally limited to queue deletion and queue clearing.
@@ -324,10 +327,13 @@ Downloaded audio files are stored in:
 | `a` | Append the focused song to the temporary Queue without playing it |
 | `pN` | Add selected playlist song(s) to another user playlist `N` |
 | `pcN` | Add the currently playing track to user playlist `N` |
-| `f` | Search the current playlist by title or uploader (empty query clears it) |
+| `f` | Find and highlight a playlist song by title or uploader (no filtering) |
 | `D` (`Shift+d`) | Permanently delete the focused song(s) after confirmation |
 | `o` | Toggle looping of the current playlist |
 | `P` | Toggle the pane without closing the playlist |
+
+Press `Esc` twice quickly while a playlist find query is active to clear the
+query. A single `Esc` leaves the playlist unchanged.
 
 Playlist song deletion has no undo/redo. A deleted song must be added again
 with `pN` from a main-window search result, queue item, or open playlist song.

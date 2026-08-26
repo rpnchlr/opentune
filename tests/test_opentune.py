@@ -568,3 +568,51 @@ class OpenTuneTests(unittest.TestCase):
         tui.handle(ord("s"))
         self.assertFalse(tui.showing_help)
         self.assertEqual([track.title for track in tui.player.queue], ["two", "one"])
+
+    def test_find_highlights_queue_and_playlist_without_filtering(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = PlaylistStore(Path(directory) / "Playlists")
+            playlist = store.create("Favorites")
+            tracks = [
+                Track("Alpha", "alpha", uploader="Artist"),
+                Track("Beta", "beta", uploader="Band"),
+            ]
+            for track in tracks:
+                store.add_track(playlist, track)
+            player = type("PlayerStub", (), {"message": "", "queue": list(tracks)})()
+            tui = PlaylistTUI.__new__(PlaylistTUI)
+            tui.store = store
+            tui.player = player
+            tui.active_playlist_id = playlist.id
+            tui.playlist_track_index = 0
+            tui.playlist_search = ""
+            tui.prompt_line = lambda label: "beta"
+            tui.find_playlist()
+            self.assertEqual(tui.playlist_track_index, 1)
+            self.assertEqual(len(tui.visible_playlist_tracks(playlist)), 2)
+
+            tui.tab = 1
+            tui.queue_index = 0
+            tui.active_playlist_id = None
+            tui.prompt_line = lambda label: "alpha"
+            tui.find_queue()
+            self.assertEqual(tui.queue_index, 0)
+
+    def test_double_escape_clears_playlist_find_query(self):
+        class PlayerStub:
+            message = ""
+
+        tui = PlaylistTUI.__new__(PlaylistTUI)
+        tui.player = PlayerStub()
+        tui.active_playlist_id = "playlist"
+        tui.playlist_search = "beta"
+        tui.playlist_track_index = 1
+        tui.visual_mode = False
+        tui.showing_help = False
+        tui._last_escape_at = 0.0
+        with patch("opentune.__main__.time.monotonic", side_effect=[10.0, 10.4]):
+            tui.handle(27)
+            self.assertEqual(tui.playlist_search, "beta")
+            tui.handle(27)
+        self.assertEqual(tui.playlist_search, "")
+        self.assertEqual(tui.playlist_track_index, 0)
