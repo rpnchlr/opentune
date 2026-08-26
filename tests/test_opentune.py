@@ -440,5 +440,98 @@ class OpenTuneTests(unittest.TestCase):
         tui.results = []
         tui.move_to_edge_main(bottom=True)
         self.assertEqual(tui.queue_index, 19)
+        tui.move_main(-1)
+        self.assertEqual(tui.queue_index, 18)
+        tui.move_main(-18)
+        self.assertEqual(tui.queue_index, 0)
         tui.move_main(-tui.half_page())
-        self.assertEqual(tui.queue_index, 9)
+        self.assertEqual(tui.queue_index, 10)
+
+    def test_search_worker_updates_results_without_blocking_ui(self):
+        class ImmediateThread:
+            def __init__(self, target, daemon=False):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        class StubPlayer:
+            message = ""
+
+        tui = PlaylistTUI.__new__(PlaylistTUI)
+        tui.player = StubPlayer()
+        tui.results = []
+        tui.result_index = 0
+        tui.tab = 1
+        tui.searching = False
+        tui._search_generation = 0
+        tui.draw = lambda: None
+        with patch.object(YouTube, "search", return_value=[Track("Found", "url")]), \
+                patch("opentune.__main__.threading.Thread", ImmediateThread):
+            tui.search("found")
+        self.assertFalse(tui.searching)
+        self.assertEqual(tui.results[0].title, "Found")
+        self.assertEqual(tui.tab, 0)
+
+    def test_playlist_p_adds_selected_song_to_another_playlist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = PlaylistStore(Path(directory) / "Playlists")
+            source = store.create("Source")
+            target = store.create("Target")
+            track = Track("Saved", "https://example.test/saved")
+            store.add_track(source, track)
+            tui = PlaylistTUI.__new__(PlaylistTUI)
+            tui.store = store
+            tui.player = type("PlayerStub", (), {"message": ""})()
+            tui.active_playlist_id = source.id
+            tui.playlist_track_index = 0
+            tui.playlist_search = ""
+            tui.visual_mode = False
+            tui.visual_anchor = None
+            tui.focus = "playlists"
+            tui.prompt_line = lambda label: "2"
+            tui.prompt_playlist_number()
+            self.assertEqual(target.tracks, [track])
+
+            current = Track("Currently playing", "https://example.test/current")
+            tui.player.current = current
+            tui.prompt_line = lambda label: "c2"
+            tui.prompt_playlist_number()
+            self.assertEqual(target.tracks, [track, current])
+
+    def test_global_controls_work_while_playlist_pane_is_focused(self):
+        class MPVStub:
+            def __init__(self):
+                self.seeks = []
+                self.pauses = 0
+
+            def seek(self, seconds):
+                self.seeks.append(seconds)
+
+            def toggle_pause(self):
+                self.pauses += 1
+
+        class PlayerStub:
+            def __init__(self):
+                self.mpv = MPVStub()
+                self.loop_toggles = 0
+
+            def toggle_loop(self):
+                self.loop_toggles += 1
+
+        tui = PlaylistTUI.__new__(PlaylistTUI)
+        tui.player = PlayerStub()
+        tui.panel_open = True
+        tui.focus = "playlists"
+        tui.tab = 0
+        tui.visual_mode = False
+        tui.visual_anchor = None
+        tui.handle(ord("H"))
+        tui.handle(ord("L"))
+        tui.handle(ord(" "))
+        tui.handle(15)
+        tui.handle(9)
+        self.assertEqual(tui.player.mpv.seeks, [-10, 10])
+        self.assertEqual(tui.player.mpv.pauses, 1)
+        self.assertEqual(tui.player.loop_toggles, 1)
+        self.assertEqual(tui.tab, 1)

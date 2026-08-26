@@ -34,6 +34,8 @@ OpenTune coordinates two established command-line programs:
 
 Search, first-time stream playback, and mix generation need an active internet
 connection. `Ctrl-d` optionally saves audio locally for offline playback.
+Searches run in the background, so pane focus, tabs, playback, seeking, and
+loop controls remain responsive while YouTube results load.
 
 ## Requirements
 
@@ -189,8 +191,8 @@ opentune --help
 
 | Key | Action |
 | --- | --- |
-| `j` or `↓` | Move selection down in Results or Queue |
-| `k` or `↑` | Move selection up in Results or Queue |
+| `j` or `↓` | Move selection down (wraps from bottom to top) |
+| `k` or `↑` | Move selection up (wraps from top to bottom) |
 | `g` / `G` | Jump to the top / bottom of the current list |
 | `Ctrl-b` / `Ctrl-f` | Move half a page up / down |
 | `Enter` | Play the selected result or queue item |
@@ -201,14 +203,16 @@ opentune --help
 | `L` (`Shift+l`) | Forward 10 seconds |
 | `Ctrl-o` | Toggle looping of the current track from any window |
 | `Tab` | Switch between **Results** and **Queue** |
-| `/` | Open a search prompt |
+| `/` | Open a search prompt from any window |
+| `Shift+h/l` or `Shift+Left/Right` | Rewind/forward 10 seconds from any window |
 | `a` | Append the selected search result to the Queue without playing it |
 | `v` | Enter/leave visual selection; extend the selection with `j`/`k` |
 | `d` | Delete the selected track(s) from the Queue |
 | `c` | Clear the Queue |
 | `u` | Undo the last queue deletion or clear |
 | `Ctrl-r` | Redo the last undone queue deletion or clear |
-| `p<N>` | Add the focused result/queue track to user playlist number `N` |
+| `pN` | Add the focused result/queue track to user playlist number `N` |
+| `pcN` | Add the currently playing track to user playlist number `N` |
 | `Ctrl-d` | Download the current/focused track to Downloads |
 | `P` | Toggle the Playlists pane |
 | `Ctrl-h` / `Ctrl-l` | Focus the main / Playlists pane when it is open |
@@ -263,6 +267,7 @@ Downloaded audio files are stored in:
 | Key | Action |
 | --- | --- |
 | `j` / `k` | Move down/up through playlists |
+| `Left` / `Right` | Leave / enter a playlist |
 | `g` / `G` | Jump to the top / bottom of the playlist list |
 | `Ctrl-b` / `Ctrl-f` | Move half a page up / down |
 | `l` | Enter the focused playlist |
@@ -284,14 +289,16 @@ Downloaded audio files are stored in:
 | `Enter` | Play the focused song and load the playlist into the temporary queue |
 | `h` | Leave the current playlist and return to the playlist list |
 | `a` | Append the focused song to the temporary Queue without playing it |
-| `f` | Search the current playlist by title or uploader |
+| `pN` | Add selected playlist song(s) to another user playlist `N` |
+| `pcN` | Add the currently playing track to user playlist `N` |
+| `f` | Search the current playlist by title or uploader (empty query clears it) |
 | `D` (`Shift+d`) | Permanently delete the focused song(s) after confirmation |
 | `o` | Toggle looping of the current playlist |
 | `s` | Shuffle the playlist into the temporary Queue without changing its saved order |
 | `P` | Toggle the pane without closing the playlist |
 
 Playlist song deletion has no undo/redo. A deleted song must be added again
-with `p<N>` from a main-window search result or queue item.
+with `pN` from a main-window search result, queue item, or open playlist song.
 
 Visual mode (`v`) makes `j`/`k` extend a contiguous selection. Press `Esc` to
 cancel visual mode without changing anything. Actions such as
@@ -302,9 +309,11 @@ selected song. Press `v` again to leave visual mode.
 
 Focus a search result or queue item in the main window, press `p`, then type its
 user-playlist number. For example, `p3` adds the focused track to user playlist
-`3`. Downloads is not a numbered target and cannot receive songs through
-`p<N>`; it is populated only by successful `Ctrl-d` downloads. This stores the
-YouTube URL and metadata in user playlists; it does not download the song.
+`3`. Inside an open playlist, `p3` adds the selected playlist song(s) to user
+playlist `3`; use `pc3` to add the currently playing track. Downloads is not a
+numbered target and cannot receive songs through `pN`/`pcN`; it is populated
+only by successful `Ctrl-d` downloads. User playlists store the YouTube URL and
+metadata; they do not download the song.
 
 ### Downloads
 

@@ -53,16 +53,18 @@ Main window keys:
   Space          Pause or resume (works from any window)
   h / l          Previous / next track
   H / L          Rewind / forward 10 seconds
+  Shift-Left/Right Rewind / forward 10 seconds
   Ctrl-o         Toggle looping for the current track (any window)
   Tab            Switch between Results and Queue
-  /              Search YouTube from inside OpenTune
+  /              Search YouTube from any window
   a              Append the selected search result to the Queue
   v              Start/stop visual selection; extend with j/k
   d              Delete selected track(s) from the Queue
   c              Clear the Queue
   u              Undo the last queue delete/clear
   Ctrl-r         Redo the last undone queue delete/clear
-  p<N>           Add focused result/queue track to user playlist N
+  pN              Add focused result/queue track to user playlist N
+  pcN             Add the currently playing track to user playlist N
   Ctrl-d         Download the current/focused track
   P              Toggle the Playlists window
   ?              Toggle this key reference in the TUI
@@ -71,13 +73,21 @@ Main window keys:
 Playlists window keys:
   Ctrl-h / Ctrl-l Focus main / playlists pane
   j / k          Move down / up
+  Left / Right    Leave / enter a playlist
+  Space          Pause or resume (works from any window)
+  H / L          Rewind / forward 10 seconds (works from any window)
+  Shift-Left/Right Rewind / forward 10 seconds (works from any window)
+  Tab            Switch between Results and Queue (works from any window)
+  /              Search YouTube (works from any window)
   l              Enter the focused playlist (playlist list only)
   h              Leave the open playlist (open playlist only)
   Enter          Play the selected song (open playlist only)
   a              Create a playlist, or append its focused song to Queue
+  pN              Add selected open-playlist song(s) to user playlist N
+  pcN             Add the currently playing track to user playlist N
   p              Pin/unpin the focused playlist (playlist list only)
   r              Rename the focused playlist
-  f              Search the open playlist
+  f              Search the open playlist (or clear with an empty query)
   D              Delete selected song(s), or focused playlist (confirm first)
   Ctrl-d         Download the focused song (open playlist only)
   Ctrl-o         Toggle looping (works from any window)
@@ -87,7 +97,7 @@ Playlists window keys:
   P              Toggle the Playlists window
 
 Playlist notes:
-  Downloads has no user-playlist index. p<N> targets user playlists only.
+  Downloads has no user-playlist index. pN/pcN target user playlists only.
   Pinned user playlists stay above unpinned playlists.
   Esc only cancels prompts and closes the help overlay; it never quits.
   Visual selections support bulk queue/playlist operations. Undo/redo do not
@@ -714,6 +724,9 @@ class PlaylistStore:
     def add_track(self, playlist: Playlist, track: Track) -> bool:
         if playlist.id == "downloads":
             return False
+        # User playlists store YouTube metadata only; local availability is
+        # resolved dynamically from the Downloads playlist when playing.
+        track = Track(track.title, track.url, track.duration, track.uploader)
         if any(item.url == track.url for item in playlist.tracks):
             return False
         playlist.tracks.append(track)
@@ -1026,6 +1039,8 @@ class PlaylistTUI:
         self.playlist_search = ""
         self.visual_mode = False
         self.visual_anchor: tuple[str, int] | None = None
+        self._search_generation = 0
+        self.searching = False
         curses.curs_set(0)
         screen.nodelay(True)
         screen.keypad(True)
@@ -1040,19 +1055,34 @@ class PlaylistTUI:
         return total_width if not self.panel_open else max(1, int(total_width * 0.6))
 
     def search(self, query: str) -> None:
+        self._search_generation += 1
+        generation = self._search_generation
         self.player.message = f"Searching YouTube for: {query}"
+        self.searching = True
         self.draw()
-        try:
-            self.results = YouTube.search(query)
+
+        def worker() -> None:
+            try:
+                results = YouTube.search(query)
+            except RuntimeError as error:
+                if generation == self._search_generation:
+                    self.searching = False
+                    self.player.message = str(error)
+                return
+            if generation != self._search_generation:
+                return
+            self.results = results
             self.result_index = 0
             self.tab = 0
-            self.player.message = f"{len(self.results)} music results for “{query}”"
-        except RuntimeError as error:
-            self.player.message = str(error)
+            self.searching = False
+            self.player.message = f"{len(results)} music results for “{query}”"
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def prompt_line(self, label: str) -> str | None:
         height, width = self.screen.getmaxyx()
-        self.screen.nodelay(False)
+        self.screen.nodelay(True)
+        self.screen.timeout(50)
         curses.curs_set(1)
         chars: list[str] = []
         cancelled = False
@@ -1064,6 +1094,8 @@ class PlaylistTUI:
                 self.screen.addnstr(height - 1, 0, text, width - 1)
                 self.screen.refresh()
                 key = self.screen.getch()
+                if key < 0:
+                    continue
                 if key in (27, 3):
                     cancelled = True
                     break
@@ -1074,13 +1106,37 @@ class PlaylistTUI:
                         chars.pop()
                 elif 32 <= key <= 126:
                     chars.append(chr(key))
+                else:
+                    self.handle_prompt_control(key)
         finally:
             self.screen.move(height - 1, 0)
             self.screen.clrtoeol()
             self.screen.refresh()
-            curses.curs_set(0)
-            self.screen.nodelay(True)
+        curses.curs_set(0)
+        self.screen.timeout(0)
+        self.screen.nodelay(True)
         return None if cancelled else "".join(chars).strip()
+
+    def handle_prompt_control(self, key: int) -> None:
+        """Run controls that are safe while a text prompt remains active."""
+        if key == 15:  # Ctrl-o
+            self.player.toggle_loop()
+        elif key == 8 and self.panel_open:  # Ctrl-h
+            self.focus = "main"
+        elif key == 12 and self.panel_open:  # Ctrl-l
+            self.focus = "playlists"
+        elif key == 9:  # Tab
+            self.tab = 1 - self.tab
+        elif key in (getattr(curses, "KEY_SLEFT", -999),):
+            self.player.mpv.seek(-10)
+        elif key in (getattr(curses, "KEY_SRIGHT", -999),):
+            self.player.mpv.seek(10)
+        elif key == 4:
+            if self.focus == "playlists" and self.active_playlist_id is not None:
+                self.download_playlist_track()
+            else:
+                self.download_current()
+        self.draw()
 
     def prompt_search(self) -> None:
         query = self.prompt_line("Search")
@@ -1090,37 +1146,29 @@ class PlaylistTUI:
             self.search(query)
 
     def prompt_playlist_number(self) -> None:
-        """Read p<N> without making users press a second Enter key."""
-        height, width = self.screen.getmaxyx()
-        self.screen.nodelay(False)
-        self.screen.timeout(500)
-        self.screen.move(height - 1, 0)
-        self.screen.clrtoeol()
-        self.screen.addnstr(height - 1, 0, "Playlist number: ", width - 1)
-        self.screen.refresh()
-        digits: list[str] = []
-        while len(digits) < 4:
-            key = self.screen.getch()
-            if key < 0 or not 48 <= key <= 57:
-                break
-            digits.append(chr(key))
-            self.screen.addch(chr(key))
-        self.screen.timeout(-1)
-        self.screen.nodelay(True)
-        self.screen.move(height - 1, 0)
-        self.screen.clrtoeol()
-        self.screen.refresh()
-        if not digits:
+        value = self.prompt_line("Playlist number (use cN for current song)")
+        if value is None:
             self.player.message = "Playlist number cancelled"
             return
-        index = int("".join(digits)) - 1
+        value = value.strip().lower()
+        current_only = value.startswith("c")
+        digits = value[1:] if current_only else value
+        if not digits.isdigit():
+            self.player.message = "Invalid playlist number"
+            return
+        index = int(digits) - 1
         playlist = self.store.get_user(index)
         if playlist is None:
             self.player.message = "Invalid playlist number"
             return
-        tracks = self.focused_main_tracks()
+        if current_only:
+            tracks = [self.player.current] if self.player.current else []
+        elif self.focus == "playlists" and self.active_playlist_id is not None:
+            tracks = [track for _, _, track in self.selected_playlist_tracks()]
+        else:
+            tracks = self.focused_main_tracks()
         if not tracks:
-            self.player.message = "Select a search result or queue track first"
+            self.player.message = "Select a track first (or start playback for cN)"
             return
         added = sum(self.store.add_track(playlist, track) for track in tracks)
         self.clear_visual()
@@ -1270,7 +1318,7 @@ class PlaylistTUI:
             "v select · Enter play · Space pause anywhere",
             "H/L seek · Ctrl-o loop · Tab Results/Queue · / search",
             "a append · d bulk-delete queue · c clear · u undo · Ctrl-r redo",
-            "p<N> add focused track to user playlist · Ctrl-d download",
+            "pN add selected track(s) · pcN add current track · Ctrl-d download",
             "Ctrl-o loop anywhere · P toggle playlists · Ctrl-h/l focus panes",
             "q quit",
             "",
@@ -1331,9 +1379,11 @@ class PlaylistTUI:
 
     def move_main(self, delta: int) -> None:
         if self.tab == 0:
-            self.result_index = max(0, min(len(self.results) - 1, self.result_index + delta))
+            if self.results:
+                self.result_index = (self.result_index + delta) % len(self.results)
         else:
-            self.queue_index = max(0, min(len(self.player.queue) - 1, self.queue_index + delta))
+            if self.player.queue:
+                self.queue_index = (self.queue_index + delta) % len(self.player.queue)
 
     def half_page(self) -> int:
         height, _ = self.screen.getmaxyx()
@@ -1376,11 +1426,14 @@ class PlaylistTUI:
 
     def move_playlists(self, delta: int) -> None:
         if self.active_playlist_id is None:
-            self.playlist_index = max(0, min(len(self.store.all()) - 1, self.playlist_index + delta))
+            playlists = self.store.all()
+            if playlists:
+                self.playlist_index = (self.playlist_index + delta) % len(playlists)
         else:
             playlist = self.current_playlist()
             count = len(self.visible_playlist_tracks(playlist)) if playlist else 0
-            self.playlist_track_index = max(0, min(count - 1, self.playlist_track_index + delta))
+            if count:
+                self.playlist_track_index = (self.playlist_track_index + delta) % count
 
     def enter_playlist(self) -> None:
         if self.active_playlist_id is not None:
@@ -1617,6 +1670,10 @@ class PlaylistTUI:
             self.move_playlists(1)
         elif key in (ord("k"), curses.KEY_UP):
             self.move_playlists(-1)
+        elif key == curses.KEY_LEFT and self.active_playlist_id is not None:
+            self.leave_playlist()
+        elif key == curses.KEY_RIGHT and self.active_playlist_id is None:
+            self.enter_playlist()
         elif key in (10, 13, curses.KEY_ENTER) and self.active_playlist_id is not None:
             self.play_playlist_track()
         elif key == ord("l") and self.active_playlist_id is None:
@@ -1638,8 +1695,11 @@ class PlaylistTUI:
             self.rename_playlist()
         elif key == ord("f"):
             self.find_playlist()
-        elif key == ord("p") and self.active_playlist_id is None:
-            self.toggle_pin_playlist()
+        elif key == ord("p"):
+            if self.active_playlist_id is None:
+                self.toggle_pin_playlist()
+            else:
+                self.prompt_playlist_number()
         elif key == ord("D"):
             if self.active_playlist_id is not None:
                 self.delete_playlist_track()
@@ -1660,6 +1720,19 @@ class PlaylistTUI:
             return
         if key == 15:
             self.player.toggle_loop()
+            return
+        if key in (ord("H"), getattr(curses, "KEY_SLEFT", -999)):
+            self.player.mpv.seek(-10)
+            return
+        if key in (ord("L"), getattr(curses, "KEY_SRIGHT", -999)):
+            self.player.mpv.seek(10)
+            return
+        if key == ord("/"):
+            self.prompt_search()
+            return
+        if key == 9:
+            self.tab = 1 - self.tab
+            self.clear_visual()
             return
         if key == ord("P"):
             self.toggle_panel()
