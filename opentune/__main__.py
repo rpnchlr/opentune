@@ -58,6 +58,7 @@ Main window keys:
   Tab            Switch between Results and Queue
   /              Search YouTube from any window
   a              Append the focused result/queue track to the Queue
+  s              Shuffle the Queue (Queue tab only)
   v              Start/stop visual selection; extend with j/k
   d              Delete selected track(s) from the Queue
   c              Clear the Queue
@@ -67,12 +68,14 @@ Main window keys:
   pcN             Add the currently playing track to user playlist N
   Ctrl-d         Download the currently playing track
   P              Toggle the Playlists window
+  Ctrl-h/l or Ctrl-Left/Right Cycle focus between panes (when open)
   ?              Toggle this key reference in the TUI
   Esc            Cancel a prompt, visual selection, or help overlay
   q              Quit OpenTune (the only quit key)
 
 Playlists window keys:
-  Ctrl-h / Ctrl-l Focus main / playlists pane
+  Ctrl-h / Ctrl-l Cycle focus left / right between panes
+  Ctrl-Left/Right Cycle focus left / right between panes
   j / k          Move down / up
   Left / Right    Leave / enter a playlist
   Space          Pause or resume (works from any window)
@@ -95,13 +98,12 @@ Playlists window keys:
   Ctrl-o         Toggle looping (works from any window)
   o              Toggle looping of the open playlist
   v              Start/stop visual selection; extend with j/k
-  s              Shuffle the open playlist into the temporary Queue
   P              Toggle the Playlists window
 
 Playlist notes:
   Downloads has no user-playlist index. pN/pcN target user playlists only.
   Pinned user playlists stay above unpinned playlists.
-  Esc only cancels prompts and closes the help overlay; it never quits.
+  Esc cancels prompts, visual selection, or the help overlay; it never quits.
   Visual selections support bulk queue/playlist operations. Undo/redo do not
   apply to playlist song changes.
 
@@ -435,6 +437,17 @@ class Player:
             self.queue.append(track)
             self._queue_redo.clear()
             self.message = f"Added to Queue: {track.title}"
+            return True
+
+    def shuffle_queue(self) -> bool:
+        """Shuffle only the temporary queue; saved playlists are untouched."""
+        with self._lock:
+            if len(self.queue) < 2:
+                self.message = "Queue needs at least two songs to shuffle"
+                return False
+            random.shuffle(self.queue)
+            self._queue_redo.clear()
+            self.message = f"Shuffled {len(self.queue)} queued tracks"
             return True
 
     def remove_queue_at(self, index: int) -> Track | None:
@@ -971,7 +984,8 @@ class TUI:
         if self.showing_help:
             if key in (ord("?"), 27):
                 self.showing_help = False
-            return
+                return
+            self.showing_help = False
         if key == ord("q"):
             self.running = False
         elif key in (ord("j"), curses.KEY_DOWN):
@@ -1123,10 +1137,10 @@ class PlaylistTUI:
         """Run controls that are safe while a text prompt remains active."""
         if key == 15:  # Ctrl-o
             self.player.toggle_loop()
-        elif key == 8 and self.panel_open:  # Ctrl-h
-            self.focus = "main"
-        elif key == 12 and self.panel_open:  # Ctrl-l
-            self.focus = "playlists"
+        elif key in (8, getattr(curses, "KEY_CLEFT", -999)):  # Ctrl-h / Ctrl-left
+            self.cycle_focus(-1)
+        elif key in (12, getattr(curses, "KEY_CRIGHT", -999)):  # Ctrl-l / Ctrl-right
+            self.cycle_focus(1)
         elif key == 9:  # Tab
             self.tab = 1 - self.tab
         elif key in (getattr(curses, "KEY_SLEFT", -999),):
@@ -1320,8 +1334,8 @@ class PlaylistTUI:
             "v select · Enter play · Space pause anywhere",
             "H/L seek · Ctrl-o loop · Tab Results/Queue · / search",
             "a append · d bulk-delete queue · c clear · u undo · Ctrl-r redo",
-            "pN add selected track(s) · pcN add current track · Ctrl-d download",
-            "Ctrl-o loop anywhere · P toggle playlists · Ctrl-h/l focus panes",
+            "s shuffle Queue only · pN add selected · pcN add current track",
+            "Ctrl-d download · P toggle playlists · Ctrl-h/l or Ctrl-arrows focus",
             "q quit",
             "",
             "PLAYLISTS WINDOW",
@@ -1330,7 +1344,7 @@ class PlaylistTUI:
             "a create (list) / append selected (open) · v select",
             "p pin/unpin playlist (list only) · D delete song or playlist",
             "D always asks for confirmation; Downloads cannot be deleted",
-            "o playlist loop · s shuffle Queue · Ctrl-d download · Ctrl-o loop",
+            "o playlist loop · Ctrl-d download · Ctrl-o loop",
         ]
         for index, line in enumerate(lines[:height]):
             attr = curses.A_BOLD if index in (0, 7) else curses.A_NORMAL
@@ -1404,27 +1418,13 @@ class PlaylistTUI:
             count = len(self.visible_playlist_tracks(self.current_playlist()))
             self.playlist_track_index = max(0, count - 1) if bottom else 0
 
-    def shuffle_playlist_queue(self) -> None:
-        playlist = self.current_playlist()
-        if playlist is None:
-            self.player.message = "Open a playlist to shuffle it into Queue"
+    def cycle_focus(self, direction: int) -> None:
+        """Cycle between the main and playlist panes, wrapping at each edge."""
+        if not self.panel_open:
             return
-        tracks = [self.store.resolve_track(track) for track in playlist.tracks]
-        if len(tracks) < 2:
-            self.player.message = "Playlist needs at least two songs to shuffle"
-            return
-        current = self.player.current if self.player.current and any(
-            track.url == self.player.current.url for track in tracks
-        ) else None
-        remaining = [track for track in tracks if not current or track.url != current.url]
-        random.shuffle(remaining)
-        shuffled = ([current] if current else []) + remaining
-        self.player.replace_queue(shuffled, current)
-        if self.player.playlist_loop:
-            self.player.set_playlist_loop(shuffled, True)
-        self.queue_index = 0
-        self.clear_visual()
-        self.player.message = f"Shuffled {len(tracks)} songs into Queue"
+        panes = ("main", "playlists")
+        current = panes.index(self.focus) if self.focus in panes else 0
+        self.focus = panes[(current + direction) % len(panes)]
 
     def move_playlists(self, delta: int) -> None:
         if self.active_playlist_id is None:
@@ -1639,6 +1639,10 @@ class PlaylistTUI:
             added = sum(self.player.enqueue(track) for track in tracks)
             self.clear_visual()
             self.player.message = f"Added {added} song(s) to Queue"
+        elif key == ord("s") and self.tab == 1:
+            self.player.shuffle_queue()
+            self.queue_index = 0
+            self.clear_visual()
         elif key == ord("d") and self.tab == 1:
             self.player.remove_queue_indices(sorted(self.selected_indices_for("main")))
             self.queue_index = max(0, min(self.queue_index, len(self.player.queue) - 1))
@@ -1691,8 +1695,6 @@ class PlaylistTUI:
             self.toggle_visual("playlist")
         elif key == ord("o") and self.active_playlist_id is not None:
             self.toggle_playlist_loop()
-        elif key == ord("s") and self.active_playlist_id is not None:
-            self.shuffle_playlist_queue()
         elif key == ord("r"):
             self.rename_playlist()
         elif key == ord("f"):
@@ -1713,6 +1715,11 @@ class PlaylistTUI:
             self.showing_help = True
 
     def handle(self, key: int) -> None:
+        if self.showing_help:
+            if key in (27, ord("?")):
+                self.showing_help = False
+                return
+            self.showing_help = False
         if key == 27 and self.visual_mode:
             self.clear_visual()
             self.player.message = "Visual selection cancelled"
@@ -1736,23 +1743,17 @@ class PlaylistTUI:
             self.tab = 1 - self.tab
             self.clear_visual()
             return
+        if key in (8, getattr(curses, "KEY_CLEFT", -999)):
+            self.cycle_focus(-1)
+            return
+        if key in (12, getattr(curses, "KEY_CRIGHT", -999)):
+            self.cycle_focus(1)
+            return
         if key == ord("P"):
             self.toggle_panel()
             return
         if key == ord("?"):
             self.showing_help = not self.showing_help
-            return
-        if self.showing_help:
-            if key == ord("q"):
-                self.running = False
-            elif key in (27, ord("?")):
-                self.showing_help = False
-            return
-        if self.panel_open and key == 8:
-            self.focus = "main"
-            return
-        if self.panel_open and key == 12:
-            self.focus = "playlists"
             return
         if self.focus == "playlists" and self.panel_open:
             self.handle_playlists(key)

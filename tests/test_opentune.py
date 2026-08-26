@@ -400,7 +400,7 @@ class OpenTuneTests(unittest.TestCase):
         self.assertIsNone(tui.visual_anchor)
         self.assertEqual(tui.player.message, "Visual selection cancelled")
 
-    def test_playlist_shuffle_changes_queue_only(self):
+    def test_queue_shuffle_changes_queue_only(self):
         from opentune.__main__ import Player
 
         with tempfile.TemporaryDirectory() as directory:
@@ -411,15 +411,16 @@ class OpenTuneTests(unittest.TestCase):
                 store.add_track(playlist, track)
             player = Player()
             player.mpv.play = lambda track, loop=False: None
+            player.queue = list(tracks)
             tui = PlaylistTUI.__new__(PlaylistTUI)
             tui.store = store
             tui.player = player
-            tui.active_playlist_id = playlist.id
+            tui.active_playlist_id = None
             tui.visual_mode = False
             tui.visual_anchor = None
             tui.queue_index = 0
             with patch("opentune.__main__.random.shuffle", side_effect=lambda values: values.reverse()):
-                tui.shuffle_playlist_queue()
+                player.shuffle_queue()
             self.assertEqual([track.url for track in playlist.tracks], [track.url for track in tracks])
             self.assertEqual([track.url for track in player.queue], [track.url for track in reversed(tracks)])
             player.close()
@@ -524,6 +525,7 @@ class OpenTuneTests(unittest.TestCase):
         tui.panel_open = True
         tui.focus = "playlists"
         tui.tab = 0
+        tui.showing_help = False
         tui.visual_mode = False
         tui.visual_anchor = None
         tui.handle(ord("H"))
@@ -531,7 +533,38 @@ class OpenTuneTests(unittest.TestCase):
         tui.handle(ord(" "))
         tui.handle(15)
         tui.handle(9)
+        tui.handle(8)
+        self.assertEqual(tui.focus, "main")
+        tui.handle(12)
         self.assertEqual(tui.player.mpv.seeks, [-10, 10])
         self.assertEqual(tui.player.mpv.pauses, 1)
         self.assertEqual(tui.player.loop_toggles, 1)
         self.assertEqual(tui.tab, 1)
+        self.assertEqual(tui.focus, "playlists")
+
+    def test_help_closes_and_executes_the_pressed_command(self):
+        class MPVStub:
+            def toggle_pause(self):
+                pass
+
+        class PlayerStub:
+            def __init__(self):
+                self.mpv = MPVStub()
+                self.queue = [Track("one", "one"), Track("two", "two")]
+                self.message = ""
+
+            def shuffle_queue(self):
+                self.queue.reverse()
+
+        tui = PlaylistTUI.__new__(PlaylistTUI)
+        tui.player = PlayerStub()
+        tui.panel_open = False
+        tui.focus = "main"
+        tui.tab = 1
+        tui.queue_index = 0
+        tui.visual_mode = False
+        tui.visual_anchor = None
+        tui.showing_help = True
+        tui.handle(ord("s"))
+        self.assertFalse(tui.showing_help)
+        self.assertEqual([track.title for track in tui.player.queue], ["two", "one"])

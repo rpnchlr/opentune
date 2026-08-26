@@ -216,6 +216,7 @@ opentune --help
 | `/` | Open a search prompt from any window |
 | `Shift+h/l` or `Shift+Left/Right` | Rewind/forward 10 seconds from any window |
 | `a` | Append the focused result/queue track to the Queue without playing it |
+| `s` (Queue tab) | Shuffle only the temporary Queue; saved playlists are unchanged |
 | `v` | Enter/leave visual selection; extend the selection with `j`/`k` |
 | `d` | Delete the selected track(s) from the Queue |
 | `c` | Clear the Queue |
@@ -225,7 +226,7 @@ opentune --help
 | `pcN` | Add the currently playing track to user playlist number `N` |
 | `Ctrl-d` | Download the currently playing track to Downloads |
 | `P` | Toggle the Playlists pane |
-| `Ctrl-h` / `Ctrl-l` | Focus the main / Playlists pane when it is open |
+| `Ctrl-h` / `Ctrl-l` or `Ctrl-Left/Right` | Cycle focus between panes (wraps) |
 | `?` | Open/close the in-player key reference |
 | `Esc` in a prompt or visual mode | Cancel the prompt or visual selection |
 | `Esc` in help | Close the help overlay |
@@ -255,8 +256,9 @@ in the undo history.
 ## Playlists window
 
 Press `P` to open or close the Playlists pane. It occupies about 40% of the
-terminal width. When open, `Ctrl-h` focuses the main player and `Ctrl-l` focuses
-the Playlists pane. The pane stays open after starting a playlist track.
+terminal width. When open, `Ctrl-h`/`Ctrl-Left` cycles focus left and
+`Ctrl-l`/`Ctrl-Right` cycles focus right; focus wraps between the panes. The
+pane stays open after starting a playlist track.
 
 The pinned `Downloads` playlist has no user-playlist index. User-created
 playlists are numbered from `1` in the visible list and remain in creation
@@ -286,7 +288,7 @@ Downloaded audio files are stored in:
 | `r` | Rename the focused playlist (`Downloads` cannot be renamed) |
 | `D` | Delete the focused playlist after confirmation (`Downloads` is protected) |
 | `P` | Toggle the pane |
-| `Ctrl-h` / `Ctrl-l` | Focus the main / Playlists pane |
+| `Ctrl-h` / `Ctrl-l` or `Ctrl-Left/Right` | Cycle focus between panes |
 
 ### Open playlist keys
 
@@ -304,7 +306,6 @@ Downloaded audio files are stored in:
 | `f` | Search the current playlist by title or uploader (empty query clears it) |
 | `D` (`Shift+d`) | Permanently delete the focused song(s) after confirmation |
 | `o` | Toggle looping of the current playlist |
-| `s` | Shuffle the playlist into the temporary Queue without changing its saved order |
 | `P` | Toggle the pane without closing the playlist |
 
 Playlist song deletion has no undo/redo. A deleted song must be added again
