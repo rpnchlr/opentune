@@ -108,6 +108,16 @@ Confirm the installed release with:
 opentune --version
 ```
 
+If a normal upgrade reports that OpenTune is already current but you suspect a
+stale or corrupted pip download, retry without pip's cache:
+
+```sh
+pipx upgrade opentune --pip-args="--no-cache-dir"
+```
+
+This only refreshes the published PyPI package. For changes that exist only in
+your local checkout, use `pipx install --force .` (or `make upgrade`) instead.
+
 OpenTune follows semantic versioning: patch releases (for example `0.2.0` → `0.2.1`) contain fixes, while minor releases add backwards-compatible features.
 
 ### Alternative: project virtual environment
@@ -205,7 +215,7 @@ opentune --help
 | `Tab` | Switch between **Results** and **Queue** |
 | `/` | Open a search prompt from any window |
 | `Shift+h/l` or `Shift+Left/Right` | Rewind/forward 10 seconds from any window |
-| `a` | Append the selected search result to the Queue without playing it |
+| `a` | Append the focused result/queue track to the Queue without playing it |
 | `v` | Enter/leave visual selection; extend the selection with `j`/`k` |
 | `d` | Delete the selected track(s) from the Queue |
 | `c` | Clear the Queue |
@@ -213,7 +223,7 @@ opentune --help
 | `Ctrl-r` | Redo the last undone queue deletion or clear |
 | `pN` | Add the focused result/queue track to user playlist number `N` |
 | `pcN` | Add the currently playing track to user playlist number `N` |
-| `Ctrl-d` | Download the current/focused track to Downloads |
+| `Ctrl-d` | Download the currently playing track to Downloads |
 | `P` | Toggle the Playlists pane |
 | `Ctrl-h` / `Ctrl-l` | Focus the main / Playlists pane when it is open |
 | `?` | Open/close the in-player key reference |

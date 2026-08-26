@@ -57,7 +57,7 @@ Main window keys:
   Ctrl-o         Toggle looping for the current track (any window)
   Tab            Switch between Results and Queue
   /              Search YouTube from any window
-  a              Append the selected search result to the Queue
+  a              Append the focused result/queue track to the Queue
   v              Start/stop visual selection; extend with j/k
   d              Delete selected track(s) from the Queue
   c              Clear the Queue
@@ -65,9 +65,10 @@ Main window keys:
   Ctrl-r         Redo the last undone queue delete/clear
   pN              Add focused result/queue track to user playlist N
   pcN             Add the currently playing track to user playlist N
-  Ctrl-d         Download the current/focused track
+  Ctrl-d         Download the currently playing track
   P              Toggle the Playlists window
   ?              Toggle this key reference in the TUI
+  Esc            Cancel a prompt, visual selection, or help overlay
   q              Quit OpenTune (the only quit key)
 
 Playlists window keys:
@@ -89,7 +90,8 @@ Playlists window keys:
   r              Rename the focused playlist
   f              Search the open playlist (or clear with an empty query)
   D              Delete selected song(s), or focused playlist (confirm first)
-  Ctrl-d         Download the focused song (open playlist only)
+  Ctrl-d         Download the focused song (open playlist only), or the
+                 currently playing song from the main window
   Ctrl-o         Toggle looping (works from any window)
   o              Toggle looping of the open playlist
   v              Start/stop visual selection; extend with j/k
