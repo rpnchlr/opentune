@@ -118,7 +118,7 @@ pipx upgrade opentune --pip-args="--no-cache-dir"
 This only refreshes the published PyPI package. For changes that exist only in
 your local checkout, use `pipx install --force .` (or `make upgrade`) instead.
 
-OpenTune follows semantic versioning: patch releases (for example `0.2.0` → `0.2.1`) contain fixes, while minor releases add backwards-compatible features.
+OpenTune follows semantic versioning: patch releases (for example `0.8.1` → `0.8.2`) contain fixes, while minor releases add backwards-compatible features.
 
 ### Alternative: project virtual environment
 
@@ -134,6 +134,27 @@ opentune "Daft Punk Get Lucky"
 
 Important: omit `--user` inside a virtual environment. The virtual environment already isolates the installation, and Python intentionally hides user site-packages from it.
 
+To upgrade OpenTune inside the local virtual environment after pulling new
+changes:
+
+```sh
+cd /path/to/opentune
+source .venv/bin/activate
+python -m pip install --upgrade .
+opentune --version
+```
+
+For development, install the checkout in editable mode so source changes are
+available immediately:
+
+```sh
+python -m pip install --editable .
+```
+
+If OpenTune was previously installed normally in this environment,
+`python -m pip install --upgrade .` is sufficient. Do not use `--user` inside
+a virtual environment.
+
 While the environment is active, `opentune` works normally. After `deactivate`, either activate it again or run the executable explicitly:
 
 ```sh
@@ -144,7 +165,7 @@ Do not use `--break-system-packages`; it bypasses Arch's protection for the syst
 
 ### Install from PyPI
 
-After OpenTune's first PyPI release, installation and future upgrades will work from any directory:
+Installation and future upgrades from PyPI work from any directory:
 
 ```sh
 pipx install opentune
@@ -347,7 +368,8 @@ Playlists window. The screen header displays `LOOP` while it is enabled. Turn
 it off with `Ctrl-o` again; then, when a track ends, OpenTune advances to the
 next item in the queue. In an open playlist, `o` loops the whole playlist and
 shows `PLOOP` in the header; it starts the playlist again after its final song.
-`Ctrl-l` is reserved for focusing the Playlists pane.
+`Ctrl-h`/`Ctrl-l` (or Ctrl-Left/Right) cycles focus between panes when the
+Playlists pane is open.
 
 ## Troubleshooting
 

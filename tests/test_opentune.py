@@ -276,7 +276,7 @@ class OpenTuneTests(unittest.TestCase):
             self.assertFalse(tui.running)
 
             tui.running = True
-            tui.handle_main(15)  # Ctrl-o is loop; Ctrl-l remains pane focus.
+            tui.handle_main(15)  # Ctrl-o toggles track looping.
             self.assertEqual(tui.player.loop_toggles, 1)
             tui.panel_open = True
             tui.handle_main(15)
