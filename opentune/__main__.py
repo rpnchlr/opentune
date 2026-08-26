@@ -72,7 +72,7 @@ Main window keys:
   P              Toggle the Playlists window
   Ctrl-h/l or Ctrl-Left/Right Cycle focus between panes (when open)
   ?              Toggle this key reference in the TUI
-  Esc            Cancel a prompt, visual selection, or help overlay
+  Esc            Cancel a prompt/visual selection; clear Queue find
   q              Quit OpenTune (the only quit key)
 
 Playlists window keys:
@@ -108,6 +108,7 @@ Playlist notes:
   Pinned user playlists stay above unpinned playlists.
   Esc cancels prompts, visual selection, or the help overlay; it never quits.
   Press Esc twice quickly in an open playlist to clear its find query.
+  Find matches use a secondary color and show their position as [current/total].
   Visual selections support bulk queue/playlist operations. Undo/redo do not
   apply to playlist song changes.
 
@@ -1063,6 +1064,15 @@ class PlaylistTUI:
         self._last_escape_at = 0.0
         self._search_generation = 0
         self.searching = False
+        self.search_attr = curses.A_BOLD
+        if curses.has_colors():
+            try:
+                curses.start_color()
+                curses.use_default_colors()
+                curses.init_pair(2, curses.COLOR_YELLOW, -1)
+                self.search_attr = curses.color_pair(2) | curses.A_BOLD
+            except curses.error:
+                pass
         curses.curs_set(0)
         screen.nodelay(True)
         screen.keypad(True)
@@ -1255,6 +1265,13 @@ class PlaylistTUI:
             if visible_index in indices
         ]
 
+    def search_query_for(self, focus_name: str) -> str:
+        if focus_name == "playlists":
+            return getattr(self, "playlist_search", "")
+        if focus_name == "main" and self.tab == 1:
+            return getattr(self, "queue_search", "")
+        return ""
+
     def draw_track_list(self, items: list[Track], selected: int, top: int, height: int, left: int, width: int, focus_name: str = "main") -> None:
         if not items:
             self.screen.addnstr(top, left + 1, "Nothing here yet.", max(1, width - 2), curses.A_DIM)
@@ -1266,8 +1283,22 @@ class PlaylistTUI:
             marker = "*" if index in selected_indices else "›" if index == selected else " "
             downloaded = " [d]" if self.store.is_downloaded(item) else ""
             text = f"{marker} {index + 1:2}. {item.label}{downloaded}  [{format_time(item.duration)}]"
-            attr = curses.A_REVERSE if (index == selected and self.focus == focus_name) else curses.A_DIM if index in selected_indices else curses.A_NORMAL
-            self.screen.addnstr(top + line, left + 1, self.clipped(text, width - 2), max(1, width - 2), attr)
+            is_focused = index == selected and self.focus == focus_name
+            attr = curses.A_REVERSE if is_focused else curses.A_DIM if index in selected_indices else curses.A_NORMAL
+            clipped = self.clipped(text, width - 2)
+            self.screen.addnstr(top + line, left + 1, clipped, max(1, width - 2), attr)
+            query = self.search_query_for(focus_name).lower().strip()
+            match_start = clipped.lower().find(query) if query else -1
+            while match_start >= 0:
+                self.screen.addnstr(
+                    top + line,
+                    left + 1 + match_start,
+                    clipped[match_start:match_start + len(query)],
+                    len(query),
+                    getattr(self, "search_attr", curses.A_BOLD) | (curses.A_REVERSE if is_focused else 0),
+                )
+                next_offset = match_start + max(1, len(query))
+                match_start = clipped.lower().find(query, next_offset)
 
     def selection_context(self, focus_name: str | None = None) -> str:
         if focus_name == "playlists":
@@ -1545,7 +1576,8 @@ class PlaylistTUI:
         self.playlist_track_index = next(
             (index for index in matches if index >= current), matches[0]
         )
-        self.player.message = f"Highlighted: {playlist.tracks[self.playlist_track_index].title}"
+        position = matches.index(self.playlist_track_index) + 1
+        self.player.message = f"Highlighted: {playlist.tracks[self.playlist_track_index].title} [{position}/{len(matches)}]"
 
     def find_queue(self) -> None:
         if not self.player.queue:
@@ -1570,7 +1602,8 @@ class PlaylistTUI:
         self.queue_index = next(
             (index for index in matches if index >= self.queue_index), matches[0]
         )
-        self.player.message = f"Highlighted: {self.player.queue[self.queue_index].title}"
+        position = matches.index(self.queue_index) + 1
+        self.player.message = f"Highlighted: {self.player.queue[self.queue_index].title} [{position}/{len(matches)}]"
 
     @staticmethod
     def _cycle_match(matches: list[int], current: int, direction: int) -> int:
@@ -1592,7 +1625,8 @@ class PlaylistTUI:
             self.player.message = f"No queue songs matching “{query}”"
             return
         self.queue_index = self._cycle_match(matches, self.queue_index, direction)
-        self.player.message = f"Highlighted: {self.player.queue[self.queue_index].title}"
+        position = matches.index(self.queue_index) + 1
+        self.player.message = f"Highlighted: {self.player.queue[self.queue_index].title} [{position}/{len(matches)}]"
 
     def next_playlist_match(self, direction: int = 1) -> None:
         playlist = self.current_playlist()
@@ -1609,7 +1643,8 @@ class PlaylistTUI:
             self.player.message = f"No playlist songs matching “{query}”"
             return
         self.playlist_track_index = self._cycle_match(matches, self.playlist_track_index, direction)
-        self.player.message = f"Highlighted: {playlist.tracks[self.playlist_track_index].title}"
+        position = matches.index(self.playlist_track_index) + 1
+        self.player.message = f"Highlighted: {playlist.tracks[self.playlist_track_index].title} [{position}/{len(matches)}]"
 
     def delete_playlist_track(self) -> None:
         selected = self.selected_playlist_tracks()
@@ -1816,6 +1851,9 @@ class PlaylistTUI:
                 else:
                     self._last_escape_at = now
                     self.player.message = "Press Esc again to clear playlist find"
+            elif self.active_playlist_id is None and self.tab == 1 and getattr(self, "queue_search", ""):
+                self.queue_search = ""
+                self.player.message = "Queue find cleared"
             return
         if key == ord(" "):
             self.player.mpv.toggle_pause()

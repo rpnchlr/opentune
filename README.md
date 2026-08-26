@@ -237,7 +237,7 @@ opentune --help
 | `Tab` | Switch between **Results** and **Queue** |
 | `/` | Open a search prompt from any window |
 | `f` (Queue tab) | Find and highlight a song in the Queue without filtering it |
-| `n` / `N` (Queue tab) | Jump to the next / previous match from the last Queue find |
+| `n` / `N` (Queue tab) | Jump to the next / previous match; status shows `[current/total]` |
 | `Shift+h/l` or `Shift+Left/Right` | Rewind/forward 10 seconds from any window |
 | `a` | Append the focused result/queue track to the Queue without playing it |
 | `s` (Queue tab) | Shuffle only the temporary Queue; saved playlists are unchanged |
@@ -253,6 +253,8 @@ opentune --help
 | `Ctrl-h` / `Ctrl-l` or `Ctrl-Left/Right` | Cycle focus between panes (wraps) |
 | `?` | Open/close the in-player key reference |
 | `Esc` in a prompt or visual mode | Cancel the prompt or visual selection |
+| `Esc` in Queue | Clear the active Queue find query |
+| `Esc` twice in an open playlist | Clear the active playlist find query |
 | `Esc` in help | Close the help overlay |
 | `q` | Quit OpenTune (the only quit key) |
 
@@ -272,7 +274,8 @@ Selecting a search result starts a YouTube radio-style mix. OpenTune filters dup
 - Press `d` to remove the highlighted queue item, or `c` to clear the whole queue.
 - Press `u` to undo the latest deletion/clear, or `Ctrl-r` to redo it.
 - Press `f` to find and highlight a queue song without changing the queue.
-- Press `n`/`N` to move to the next/previous match; matches wrap around.
+- Press `n`/`N` to move to the next/previous match; matches wrap around and
+  the status line reports their position as `[current/total]`.
 - Use `Tab` to return to Results.
 
 Undo and redo are intentionally limited to queue deletion and queue clearing.
@@ -330,13 +333,15 @@ Downloaded audio files are stored in:
 | `pN` | Add selected playlist song(s) to another user playlist `N` |
 | `pcN` | Add the currently playing track to user playlist `N` |
 | `f` | Find and highlight a playlist song by title or uploader (no filtering) |
-| `n` / `N` | Jump to the next / previous match from the last playlist find |
+| `n` / `N` | Jump to the next / previous match; status shows `[current/total]` |
 | `D` (`Shift+d`) | Permanently delete the focused song(s) after confirmation |
 | `o` | Toggle looping of the current playlist |
 | `P` | Toggle the pane without closing the playlist |
 
-Press `Esc` twice quickly while a playlist find query is active to clear the
-query. A single `Esc` leaves the playlist unchanged.
+The matching text is shown in a secondary color while the selected row keeps
+the primary selection color. Press `Esc` twice quickly while a playlist find
+query is active to clear the query. A single `Esc` leaves the playlist
+unchanged.
 
 Playlist song deletion has no undo/redo. A deleted song must be added again
 with `pN` from a main-window search result, queue item, or open playlist song.

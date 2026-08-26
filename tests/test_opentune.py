@@ -590,9 +590,11 @@ class OpenTuneTests(unittest.TestCase):
             tui.prompt_line = lambda label: "beta"
             tui.find_playlist()
             self.assertEqual(tui.playlist_track_index, 1)
+            self.assertIn("[1/2]", player.message)
             self.assertEqual(len(tui.visible_playlist_tracks(playlist)), 3)
             tui.next_playlist_match(1)
             self.assertEqual(tui.playlist_track_index, 2)
+            self.assertIn("[2/2]", player.message)
             tui.next_playlist_match(-1)
             self.assertEqual(tui.playlist_track_index, 1)
 
@@ -602,8 +604,10 @@ class OpenTuneTests(unittest.TestCase):
             tui.prompt_line = lambda label: "beta"
             tui.find_queue()
             self.assertEqual(tui.queue_index, 1)
+            self.assertIn("[1/2]", player.message)
             tui.next_queue_match(1)
             self.assertEqual(tui.queue_index, 2)
+            self.assertIn("[2/2]", player.message)
             tui.next_queue_match(-1)
             self.assertEqual(tui.queue_index, 1)
 
