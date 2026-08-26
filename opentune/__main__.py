@@ -58,6 +58,7 @@ Main window keys:
   Tab            Switch between Results and Queue
   /              Search YouTube from any window
   f              Find and highlight a song in the Queue (Queue tab)
+  n / N          Next / previous Queue match after using f
   a              Append the focused result/queue track to the Queue
   s              Shuffle the Queue (Queue tab only)
   v              Start/stop visual selection; extend with j/k
@@ -85,6 +86,7 @@ Playlists window keys:
   Tab            Switch between Results and Queue (works from any window)
   /              Search YouTube (works from any window)
   f              Find and highlight a song in the open playlist
+  n / N          Next / previous playlist match after using f
   l              Enter the focused playlist (playlist list only)
   h              Leave the open playlist (open playlist only)
   Enter          Play the selected song (open playlist only)
@@ -1055,6 +1057,7 @@ class PlaylistTUI:
         self.active_playlist_id: str | None = None
         self.playlist_track_index = 0
         self.playlist_search = ""
+        self.queue_search = ""
         self.visual_mode = False
         self.visual_anchor: tuple[str, int] | None = None
         self._last_escape_at = 0.0
@@ -1334,7 +1337,7 @@ class PlaylistTUI:
             "v select · Enter play · Space pause anywhere",
             "H/L seek · Ctrl-o loop · Tab Results/Queue · / search",
             "a append · d bulk-delete queue · c clear · u undo · Ctrl-r redo",
-            "f find/highlight Queue song · s shuffle Queue · pN/pcN playlists",
+            "f find Queue song · n/N next/previous match · s shuffle Queue",
             "Ctrl-d download · P toggle playlists · Ctrl-h/l or Ctrl-arrows focus",
             "q quit",
             "",
@@ -1344,7 +1347,7 @@ class PlaylistTUI:
             "a create (list) / append selected (open) · v select",
             "p pin/unpin playlist (list only) · D delete song or playlist",
             "D always asks for confirmation; Downloads cannot be deleted",
-            "f find/highlight song · o playlist loop · Ctrl-d download",
+            "f find song · n/N next/previous match · o playlist loop",
             "Esc twice quickly clears the playlist find query · Ctrl-o loop",
         ]
         for index, line in enumerate(lines[:height]):
@@ -1553,6 +1556,7 @@ class PlaylistTUI:
             self.player.message = "Queue find cancelled"
             return
         needle = query.lower().strip()
+        self.queue_search = query
         if not needle:
             self.player.message = "Queue find cleared"
             return
@@ -1567,6 +1571,45 @@ class PlaylistTUI:
             (index for index in matches if index >= self.queue_index), matches[0]
         )
         self.player.message = f"Highlighted: {self.player.queue[self.queue_index].title}"
+
+    @staticmethod
+    def _cycle_match(matches: list[int], current: int, direction: int) -> int:
+        if direction > 0:
+            return next((index for index in matches if index > current), matches[0])
+        return next((index for index in reversed(matches) if index < current), matches[-1])
+
+    def next_queue_match(self, direction: int = 1) -> None:
+        query = getattr(self, "queue_search", "")
+        needle = query.lower().strip()
+        if not needle:
+            self.player.message = "Use f to find a song in the Queue first"
+            return
+        matches = [
+            index for index, track in enumerate(self.player.queue)
+            if needle in track.title.lower() or needle in track.uploader.lower()
+        ]
+        if not matches:
+            self.player.message = f"No queue songs matching “{query}”"
+            return
+        self.queue_index = self._cycle_match(matches, self.queue_index, direction)
+        self.player.message = f"Highlighted: {self.player.queue[self.queue_index].title}"
+
+    def next_playlist_match(self, direction: int = 1) -> None:
+        playlist = self.current_playlist()
+        query = getattr(self, "playlist_search", "")
+        needle = query.lower().strip()
+        if playlist is None or not needle:
+            self.player.message = "Use f to find a song in the playlist first"
+            return
+        matches = [
+            index for index, track in enumerate(playlist.tracks)
+            if needle in track.title.lower() or needle in track.uploader.lower()
+        ]
+        if not matches:
+            self.player.message = f"No playlist songs matching “{query}”"
+            return
+        self.playlist_track_index = self._cycle_match(matches, self.playlist_track_index, direction)
+        self.player.message = f"Highlighted: {playlist.tracks[self.playlist_track_index].title}"
 
     def delete_playlist_track(self) -> None:
         selected = self.selected_playlist_tracks()
@@ -1803,6 +1846,13 @@ class PlaylistTUI:
                 self.find_playlist()
             elif self.tab == 1:
                 self.find_queue()
+            return
+        if key in (ord("n"), ord("N")):
+            direction = 1 if key == ord("n") else -1
+            if self.focus == "playlists" and self.panel_open and self.active_playlist_id is not None:
+                self.next_playlist_match(direction)
+            elif self.tab == 1:
+                self.next_queue_match(direction)
             return
         if key in (8, getattr(curses, "KEY_CLEFT", -999)):
             self.cycle_focus(-1)

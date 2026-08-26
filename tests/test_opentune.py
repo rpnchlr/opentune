@@ -576,6 +576,7 @@ class OpenTuneTests(unittest.TestCase):
             tracks = [
                 Track("Alpha", "alpha", uploader="Artist"),
                 Track("Beta", "beta", uploader="Band"),
+                Track("Beta reprise", "beta-reprise", uploader="Band"),
             ]
             for track in tracks:
                 store.add_track(playlist, track)
@@ -589,14 +590,22 @@ class OpenTuneTests(unittest.TestCase):
             tui.prompt_line = lambda label: "beta"
             tui.find_playlist()
             self.assertEqual(tui.playlist_track_index, 1)
-            self.assertEqual(len(tui.visible_playlist_tracks(playlist)), 2)
+            self.assertEqual(len(tui.visible_playlist_tracks(playlist)), 3)
+            tui.next_playlist_match(1)
+            self.assertEqual(tui.playlist_track_index, 2)
+            tui.next_playlist_match(-1)
+            self.assertEqual(tui.playlist_track_index, 1)
 
             tui.tab = 1
             tui.queue_index = 0
             tui.active_playlist_id = None
-            tui.prompt_line = lambda label: "alpha"
+            tui.prompt_line = lambda label: "beta"
             tui.find_queue()
-            self.assertEqual(tui.queue_index, 0)
+            self.assertEqual(tui.queue_index, 1)
+            tui.next_queue_match(1)
+            self.assertEqual(tui.queue_index, 2)
+            tui.next_queue_match(-1)
+            self.assertEqual(tui.queue_index, 1)
 
     def test_double_escape_clears_playlist_find_query(self):
         class PlayerStub:
