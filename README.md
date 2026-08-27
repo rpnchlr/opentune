@@ -217,7 +217,7 @@ opentune --help
 5. The title and time appear at the top of the screen.
 6. OpenTune prepares a YouTube radio-style mix in the background. Press `Tab` to view it in the **Queue** tab.
 7. Press `q` to quit. `Esc` cancels prompts/visual mode; press it twice quickly
-   inside a playlist to clear its find query.
+   in Queue or an open playlist to clear its find query.
 
 ## Keybinds
 
@@ -253,7 +253,7 @@ opentune --help
 | `Ctrl-h` / `Ctrl-l` or `Ctrl-Left/Right` | Cycle focus between panes (wraps) |
 | `?` | Open/close the in-player key reference |
 | `Esc` in a prompt or visual mode | Cancel the prompt or visual selection |
-| `Esc` in Queue | Clear the active Queue find query |
+| `Esc` twice in Queue | Clear the active Queue find query |
 | `Esc` twice in an open playlist | Clear the active playlist find query |
 | `Esc` in help | Close the help overlay |
 | `q` | Quit OpenTune (the only quit key) |
@@ -339,9 +339,9 @@ Downloaded audio files are stored in:
 | `P` | Toggle the pane without closing the playlist |
 
 The matching text is shown in a secondary color while the selected row keeps
-the primary selection color. Press `Esc` twice quickly while a playlist find
-query is active to clear the query. A single `Esc` leaves the playlist
-unchanged.
+the primary selection color. Press `Esc` twice quickly while a Queue or
+playlist find query is active to clear the query. A single `Esc` leaves the
+current list unchanged.
 
 Playlist song deletion has no undo/redo. A deleted song must be added again
 with `pN` from a main-window search result, queue item, or open playlist song.

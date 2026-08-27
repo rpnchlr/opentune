@@ -629,3 +629,21 @@ class OpenTuneTests(unittest.TestCase):
             tui.handle(27)
         self.assertEqual(tui.playlist_search, "")
         self.assertEqual(tui.playlist_track_index, 0)
+
+    def test_double_escape_clears_queue_find_query(self):
+        class PlayerStub:
+            message = ""
+
+        tui = PlaylistTUI.__new__(PlaylistTUI)
+        tui.player = PlayerStub()
+        tui.active_playlist_id = None
+        tui.tab = 1
+        tui.queue_search = "beta"
+        tui.visual_mode = False
+        tui.showing_help = False
+        tui._last_escape_at = 0.0
+        with patch("opentune.__main__.time.monotonic", side_effect=[20.0, 20.4]):
+            tui.handle(27)
+            self.assertEqual(tui.queue_search, "beta")
+            tui.handle(27)
+        self.assertEqual(tui.queue_search, "")

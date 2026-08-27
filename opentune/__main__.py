@@ -72,7 +72,7 @@ Main window keys:
   P              Toggle the Playlists window
   Ctrl-h/l or Ctrl-Left/Right Cycle focus between panes (when open)
   ?              Toggle this key reference in the TUI
-  Esc            Cancel a prompt/visual selection; clear Queue find
+  Esc            Cancel a prompt/visual selection
   q              Quit OpenTune (the only quit key)
 
 Playlists window keys:
@@ -107,7 +107,7 @@ Playlist notes:
   Downloads has no user-playlist index. pN/pcN target user playlists only.
   Pinned user playlists stay above unpinned playlists.
   Esc cancels prompts, visual selection, or the help overlay; it never quits.
-  Press Esc twice quickly in an open playlist to clear its find query.
+  Press Esc twice quickly in Queue or an open playlist to clear its find query.
   Find matches use a secondary color and show their position as [current/total].
   Visual selections support bulk queue/playlist operations. Undo/redo do not
   apply to playlist song changes.
@@ -1379,7 +1379,7 @@ class PlaylistTUI:
             "p pin/unpin playlist (list only) · D delete song or playlist",
             "D always asks for confirmation; Downloads cannot be deleted",
             "f find song · n/N next/previous match · o playlist loop",
-            "Esc twice quickly clears the playlist find query · Ctrl-o loop",
+            "Esc twice quickly clears Queue/playlist find · Ctrl-o loop",
         ]
         for index, line in enumerate(lines[:height]):
             attr = curses.A_BOLD if index in (0, 7) else curses.A_NORMAL
@@ -1852,8 +1852,14 @@ class PlaylistTUI:
                     self._last_escape_at = now
                     self.player.message = "Press Esc again to clear playlist find"
             elif self.active_playlist_id is None and self.tab == 1 and getattr(self, "queue_search", ""):
-                self.queue_search = ""
-                self.player.message = "Queue find cleared"
+                now = time.monotonic()
+                if now - getattr(self, "_last_escape_at", 0.0) <= 0.8:
+                    self.queue_search = ""
+                    self._last_escape_at = 0.0
+                    self.player.message = "Queue find cleared"
+                else:
+                    self._last_escape_at = now
+                    self.player.message = "Press Esc again to clear Queue find"
             return
         if key == ord(" "):
             self.player.mpv.toggle_pause()
