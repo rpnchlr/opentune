@@ -1350,6 +1350,7 @@ class PlaylistTUI:
                 if suggest and query_text != suggestion_query:
                     suggestion_query = query_text
                     suggestion_index = 0
+                    suggestions.clear()
                     request_suggestions(query_text)
                 self.screen.move(height - 1, 0)
                 self.screen.clrtoeol()
@@ -1359,13 +1360,15 @@ class PlaylistTUI:
                 visible_query = "".join(chars[start:start + available])
                 text = prefix + visible_query
                 self.screen.addnstr(height - 1, 0, text, width - 1)
-                if suggest and suggestions:
-                    for offset, track in enumerate(suggestions[: min(5, height - 2)]):
-                        row = height - 2 - offset
+                visible_suggestions = suggestions[: max(1, min(5, height - 2))]
+                if suggest and visible_suggestions:
+                    history_urls = {
+                        item.url for item in self.history_store.search(query_text)
+                    } if hasattr(self, "history_store") else set()
+                    first_row = height - 1 - len(visible_suggestions)
+                    for offset, track in enumerate(visible_suggestions):
+                        row = first_row + offset
                         marker = "› " if offset == suggestion_index else "  "
-                        history_urls = {
-                            item.url for item in self.history_store.search(query_text)
-                        } if hasattr(self, "history_store") else set()
                         source = "[history] " if track.url in history_urls else ""
                         self.screen.move(row, 0)
                         self.screen.clrtoeol()
@@ -1380,8 +1383,8 @@ class PlaylistTUI:
                     cancelled = True
                     break
                 if key in (10, 13, curses.KEY_ENTER):
-                    if suggest and suggestions and suggestion_index < len(suggestions):
-                        chosen = suggestions[suggestion_index].title
+                    if suggest and visible_suggestions and suggestion_index < len(visible_suggestions):
+                        chosen = visible_suggestions[suggestion_index].title
                         chars[:] = list(chosen)
                         cursor = len(chars)
                     break
@@ -1411,11 +1414,11 @@ class PlaylistTUI:
                     while cursor < len(chars) and not chars[cursor].isspace():
                         cursor += 1
                 elif suggest and key in (curses.KEY_DOWN, curses.KEY_UP):
-                    if suggestions:
+                    if visible_suggestions:
                         step = 1 if key == curses.KEY_DOWN else -1
-                        suggestion_index = (suggestion_index + step) % len(suggestions)
-                elif key == 9 and suggest and suggestions:
-                    chosen = suggestions[suggestion_index].title
+                        suggestion_index = max(0, min(len(visible_suggestions) - 1, suggestion_index + step))
+                elif key == 9 and suggest and visible_suggestions:
+                    chosen = visible_suggestions[suggestion_index].title
                     chars[:] = list(chosen)
                     cursor = len(chars)
                 elif 32 <= key <= 126:
@@ -1627,7 +1630,7 @@ class PlaylistTUI:
             self.clear_visual()
             self.player.message = "Selection mode off"
             return
-        index = self.playlist_track_index if context == "playlist" else self.result_index if context == "results" else self.queue_index
+        index = self.playlist_track_index if context == "playlist" else self.result_index if context in ("results", "suggestions") else self.queue_index
         self.visual_mode = True
         self.visual_anchor = (context, index)
         self.player.message = "Selection mode on: move with j/k, operate on selected tracks"
@@ -1649,6 +1652,7 @@ class PlaylistTUI:
         self.screen.hline(5, 0, curses.ACS_HLINE, width)
         tabs = "[ Results ]" if self.tab == 0 else "  Results  "
         tabs += "     " + ("[ Queue ]" if self.tab == 1 else "  Queue  ")
+        tabs += "     " + ("[ Suggestions ]" if self.tab == 2 else "  Suggestions  ")
         self.screen.addnstr(6, 2, tabs, max(1, width - 4), curses.A_BOLD)
         list_height = max(1, height - 10)
         if self.showing_help:
