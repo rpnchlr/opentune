@@ -24,6 +24,7 @@ from . import __version__
 
 SEARCH_LIMIT = 12
 MIX_LIMIT = 10
+SUGGESTION_DEBOUNCE = 0.08
 PROJECT_URL = "https://github.com/rpnchlr/opentune"
 INSTALL_MESSAGE = (
     "Thank you for installing OpenTune! Consider supporting the creator by "
@@ -31,7 +32,7 @@ INSTALL_MESSAGE = (
 )
 UPDATE_NOTICE_LINES = (
     "Thank you for using OpenTune!",
-    "OpenTune v0.9.0 is now installed.",
+    "OpenTune v0.9.1 is now installed.",
     "Consider supporting the creator by starring or sponsoring:",
     PROJECT_URL,
     "",
@@ -69,7 +70,8 @@ Main window keys:
   H / L          Rewind / forward 10 seconds
   Shift-Left/Right Rewind / forward 10 seconds
   Ctrl-o         Toggle looping for the current track (any window)
-  Tab            Switch between Results, Queue, and Suggestions
+  Tab            Next tab: Results, Queue, Suggestions, History
+  Shift-Tab      Previous tab
   /              Search YouTube from any window
   f              Find and highlight a song in the Queue (Queue tab)
   n / N          Next / previous Queue match after using f
@@ -99,7 +101,7 @@ Playlists window keys:
   Space          Pause or resume (works from any window)
   H / L          Rewind / forward 10 seconds (works from any window)
   Shift-Left/Right Rewind / forward 10 seconds (works from any window)
-  Tab            Switch between Results, Queue, and Suggestions (any window)
+  Tab            Next tab; Shift-Tab previous tab (any window)
   /              Search YouTube (works from any window)
   f              Find and highlight a song in the open playlist
   n / N          Next / previous playlist match after using f
@@ -185,9 +187,23 @@ def fuzzy_score(query: str, candidate: str) -> int | None:
     return 700 - (first or 0) * 2 - gaps
 
 
+def song_match_score(query: str, track: Track) -> int | None:
+    """Prefer song-title matches and only use artist matches as a fallback."""
+    title_score = fuzzy_score(query, track.title)
+    if title_score is not None:
+        return title_score + 250
+    artist_score = fuzzy_score(query, track.uploader)
+    return artist_score - 100 if artist_score is not None else None
+
+
 def require_tools() -> str | None:
     absent = [name for name in ("mpv", "yt-dlp") if not shutil.which(name)]
     return f"Missing required command(s): {', '.join(absent)}" if absent else None
+
+
+def is_backtab(key: int) -> bool:
+    """Recognize Shift-Tab across terminals with different curses values."""
+    return key in {getattr(curses, "KEY_BTAB", -999), 353}
 
 
 class YouTube:
@@ -236,6 +252,18 @@ class YouTube:
         if not query.strip():
             return []
         return cls._fetch(f"ytsearch{limit}:{query} music", "Search")
+
+    @classmethod
+    def suggestions(cls, query: str, limit: int = 5) -> list[Track]:
+        """Return only music results whose title or artist matches the query."""
+        candidates = cls.search(query, max(limit * 2, 8))
+        ranked = [
+            (score, index, track)
+            for index, track in enumerate(candidates)
+            if (score := song_match_score(query, track)) is not None
+        ]
+        ranked.sort(key=lambda item: (-item[0], item[1]))
+        return [track for _, _, track in ranked[:limit]]
 
     @staticmethod
     def _video_id(url: str) -> str | None:
@@ -474,8 +502,7 @@ class HistoryStore:
         """Return history entries matching a search using lightweight fuzzy scoring."""
         ranked: list[tuple[int, int, Track]] = []
         for recency, track in enumerate(self.tracks()):
-            candidate = f"{track.title} {track.uploader}"
-            score = fuzzy_score(query, candidate)
+            score = song_match_score(query, track)
             if score is not None:
                 ranked.append((score, -recency, track))
         ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
@@ -1114,7 +1141,6 @@ class TUI:
         self.screen.hline(5, 0, curses.ACS_HLINE, width)
         tabs = "[ Results ]" if self.tab == 0 else "  Results  "
         tabs += "     " + ("[ Queue ]" if self.tab == 1 else "  Queue  ")
-        tabs += "     " + ("[ Suggestions ]" if self.tab == 2 else "  Suggestions  ")
         self.screen.addnstr(6, 2, tabs, width - 4, curses.A_BOLD)
         list_height = max(1, height - 10)
         if self.showing_help:
@@ -1135,7 +1161,7 @@ class TUI:
             "j / ↓    down       k / ↑    up        Enter    play selection",
             "Space    pause/play h        previous  l        next",
             "H        rewind 10s L        forward 10s Ctrl-o   toggle loop",
-            "Tab      Results/Queue/Suggestions  / search   a add to Queue",
+            "Tab      Results/Queue       / search   a add to Queue",
             "d download focused song  D delete Queue  c clear Queue (confirm)",
             "Ctrl-r   redo               ?        this help    q        quit",
             "Esc      cancel search (in prompt)",
@@ -1239,9 +1265,11 @@ class PlaylistTUI:
         self.history_store = HistoryStore(store.root.parent)
         self.player.history_store = self.history_store
         self.results: list[Track] = []
-        self.suggestions: list[Track] = self.history_store.recommendations()
+        self.suggestions: list[Track] = []
+        self.history_results: list[Track] = []
         self.result_index = 0
         self.queue_index = 0
+        self.history_index = 0
         self.tab = 0
         self.running = True
         self.showing_help = False
@@ -1259,6 +1287,8 @@ class PlaylistTUI:
         self.clipboard_source_id: str | None = None
         self._last_escape_at = 0.0
         self._search_generation = 0
+        self._history_signature: tuple[str, ...] | None = None
+        self._suggestion_generation = 0
         self.searching = False
         self.search_attr = curses.A_BOLD
         if curses.has_colors():
@@ -1272,6 +1302,7 @@ class PlaylistTUI:
         curses.curs_set(0)
         screen.nodelay(True)
         screen.keypad(True)
+        self.refresh_history_views()
         if initial_query:
             self.search(initial_query)
 
@@ -1281,6 +1312,40 @@ class PlaylistTUI:
 
     def main_width(self, total_width: int) -> int:
         return total_width if not self.panel_open else max(1, int(total_width * 0.6))
+
+    def refresh_history_views(self) -> None:
+        """Refresh History and seed Suggestions from the latest listening data."""
+        history = self.history_store.tracks()
+        self.history_results = history
+        signature = tuple(track.url for track in history)
+        if signature == self._history_signature:
+            return
+        self._history_signature = signature
+        self._suggestion_generation += 1
+        generation = self._suggestion_generation
+        self.suggestions = history[:SEARCH_LIMIT]
+        if not history:
+            return
+
+        seed = history[0]
+
+        def worker() -> None:
+            try:
+                related = YouTube.mix_for(seed)
+            except RuntimeError:
+                return
+            if generation != self._suggestion_generation:
+                return
+            seen = {track.url for track in self.suggestions}
+            additions: list[Track] = []
+            for track in related:
+                if track.url in seen:
+                    continue
+                seen.add(track.url)
+                additions.append(track)
+            self.suggestions.extend(additions)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def search(self, query: str) -> None:
         self._search_generation += 1
@@ -1329,13 +1394,13 @@ class PlaylistTUI:
                 return
 
             def worker() -> None:
-                time.sleep(0.25)
+                time.sleep(SUGGESTION_DEBOUNCE)
                 if generation != suggestion_generation:
                     return
                 history_matches = self.history_store.search(query) if suggest and hasattr(self, "history_store") else []
                 suggestions[:] = history_matches
                 try:
-                    found = YouTube.search(query, limit=5)
+                    found = YouTube.suggestions(query, limit=5)
                 except RuntimeError:
                     found = []
                 if generation == suggestion_generation:
@@ -1350,7 +1415,9 @@ class PlaylistTUI:
                 if suggest and query_text != suggestion_query:
                     suggestion_query = query_text
                     suggestion_index = 0
-                    suggestions.clear()
+                    suggestions[:] = self.history_store.search(query_text) if (
+                        len(query_text.strip()) >= 2 and hasattr(self, "history_store")
+                    ) else []
                     request_suggestions(query_text)
                 self.screen.move(height - 1, 0)
                 self.screen.clrtoeol()
@@ -1446,8 +1513,10 @@ class PlaylistTUI:
             self.cycle_focus(-1)
         elif key in (12, getattr(curses, "KEY_CRIGHT", -999)):  # Ctrl-l / Ctrl-right
             self.cycle_focus(1)
+        elif is_backtab(key):  # Shift-Tab
+            self.tab = (self.tab - 1) % 4
         elif key == 9:  # Tab
-            self.tab = 1 - self.tab
+            self.tab = (self.tab + 1) % 4
         elif key in (getattr(curses, "KEY_SLEFT", -999),):
             self.player.mpv.seek(-10)
         elif key in (getattr(curses, "KEY_SRIGHT", -999),):
@@ -1514,7 +1583,7 @@ class PlaylistTUI:
         self.screen.move(height - 1, 0)
         self.screen.clrtoeol()
         self.screen.refresh()
-        return key == ord("1")
+        return answer
 
     def focused_main_track(self) -> Track | None:
         if self.tab == 0 and self.results:
@@ -1525,6 +1594,10 @@ class PlaylistTUI:
             suggestions = getattr(self, "suggestions", [])
             if suggestions:
                 return suggestions[self.result_index]
+        if self.tab == 3:
+            history = getattr(self, "history_results", [])
+            if history:
+                return history[self.history_index]
         return None
 
     def focused_main_tracks(self) -> list[Track]:
@@ -1534,7 +1607,9 @@ class PlaylistTUI:
         if self.tab == 1:
             indices = self.selected_indices_for("main")
             return [self.player.queue[index] for index in sorted(indices) if 0 <= index < len(self.player.queue)]
-        return [self.suggestions[index] for index in sorted(self.selected_indices_for("main")) if 0 <= index < len(self.suggestions)]
+        if self.tab == 2:
+            return [self.suggestions[index] for index in sorted(self.selected_indices_for("main")) if 0 <= index < len(self.suggestions)]
+        return [self.history_results[index] for index in sorted(self.selected_indices_for("main")) if 0 <= index < len(self.history_results)]
 
     def current_playlist(self) -> Playlist | None:
         if self.active_playlist_id is None:
@@ -1574,9 +1649,9 @@ class PlaylistTUI:
             return getattr(self, "queue_search", "")
         return ""
 
-    def draw_track_list(self, items: list[Track], selected: int, top: int, height: int, left: int, width: int, focus_name: str = "main") -> None:
+    def draw_track_list(self, items: list[Track], selected: int, top: int, height: int, left: int, width: int, focus_name: str = "main", empty_message: str = "Nothing here yet.") -> None:
         if not items:
-            self.screen.addnstr(top, left + 1, "Nothing here yet.", max(1, width - 2), curses.A_DIM)
+            self.screen.addnstr(top, left + 1, empty_message, max(1, width - 2), curses.A_DIM)
             return
         start = max(0, min(selected - height + 1, len(items) - height))
         for line, index in enumerate(range(start, min(len(items), start + height))):
@@ -1606,19 +1681,19 @@ class PlaylistTUI:
         if focus_name == "playlists":
             return "playlist"
         if focus_name == "main":
-            return ("results" if self.tab == 0 else "queue" if self.tab == 1 else "suggestions")
+            return ("results" if self.tab == 0 else "queue" if self.tab == 1 else "suggestions" if self.tab == 2 else "history")
         if self.active_playlist_id is not None:
             return "playlist"
-        return "results" if self.tab == 0 else "queue" if self.tab == 1 else "suggestions"
+        return "results" if self.tab == 0 else "queue" if self.tab == 1 else "suggestions" if self.tab == 2 else "history"
 
     def selected_indices_for(self, focus_name: str = "main") -> set[int]:
         context = self.selection_context(focus_name)
         if not self.visual_mode or not self.visual_anchor or self.visual_anchor[0] != context:
             if context == "playlist":
                 return {self.playlist_track_index}
-            return {self.result_index if context in ("results", "suggestions") else self.queue_index}
+            return {self.result_index if context in ("results", "suggestions") else self.history_index if context == "history" else self.queue_index}
         start = self.visual_anchor[1]
-        end = self.playlist_track_index if context == "playlist" else self.result_index if context in ("results", "suggestions") else self.queue_index
+        end = self.playlist_track_index if context == "playlist" else self.result_index if context in ("results", "suggestions") else self.history_index if context == "history" else self.queue_index
         return set(range(min(start, end), max(start, end) + 1))
 
     def clear_visual(self) -> None:
@@ -1630,12 +1705,13 @@ class PlaylistTUI:
             self.clear_visual()
             self.player.message = "Selection mode off"
             return
-        index = self.playlist_track_index if context == "playlist" else self.result_index if context in ("results", "suggestions") else self.queue_index
+        index = self.playlist_track_index if context == "playlist" else self.result_index if context in ("results", "suggestions") else self.history_index if context == "history" else self.queue_index
         self.visual_mode = True
         self.visual_anchor = (context, index)
         self.player.message = "Selection mode on: move with j/k, operate on selected tracks"
 
     def draw_main(self, width: int) -> None:
+        self.refresh_history_views()
         height, _ = self.screen.getmaxyx()
         current = self.player.current
         position, paused = self.player.mpv.state() if current else (0, False)
@@ -1653,6 +1729,7 @@ class PlaylistTUI:
         tabs = "[ Results ]" if self.tab == 0 else "  Results  "
         tabs += "     " + ("[ Queue ]" if self.tab == 1 else "  Queue  ")
         tabs += "     " + ("[ Suggestions ]" if self.tab == 2 else "  Suggestions  ")
+        tabs += "     " + ("[ History ]" if self.tab == 3 else "  History  ")
         self.screen.addnstr(6, 2, tabs, max(1, width - 4), curses.A_BOLD)
         list_height = max(1, height - 10)
         if self.showing_help:
@@ -1661,9 +1738,29 @@ class PlaylistTUI:
             self.draw_track_list(self.results, self.result_index, 8, list_height, 0, width)
         elif self.tab == 1:
             self.draw_track_list(self.player.queue, self.queue_index, 8, list_height, 0, width)
+        elif self.tab == 2:
+            self.result_index = min(self.result_index, max(0, len(self.suggestions) - 1))
+            self.draw_track_list(
+                self.suggestions,
+                self.result_index,
+                8,
+                list_height,
+                0,
+                width,
+                empty_message="Play songs to build history-based suggestions.",
+            )
         else:
-            self.suggestions = self.history_store.recommendations() if hasattr(self, "history_store") else getattr(self, "suggestions", [])
-            self.draw_track_list(self.suggestions, self.result_index, 8, list_height, 0, width)
+            self.history_results = self.history_store.tracks() if hasattr(self, "history_store") else getattr(self, "history_results", [])
+            self.history_index = min(self.history_index, max(0, len(self.history_results) - 1))
+            self.draw_track_list(
+                self.history_results,
+                self.history_index,
+                8,
+                list_height,
+                0,
+                width,
+                empty_message="No listening history yet.",
+            )
         self.screen.hline(height - 2, 0, curses.ACS_HLINE, width)
         self.screen.addnstr(height - 1, 2, self.clipped(self.player.message, width - 4), max(1, width - 4), curses.A_DIM)
 
@@ -1673,7 +1770,7 @@ class PlaylistTUI:
             "j/k move · g/G top/bottom · Ctrl-b/f half-page",
             "[/] previous/next search result · Enter play",
             "v select · Enter play · Space pause anywhere",
-            "H/L seek · Ctrl-o loop · Tab Results/Queue/Suggestions · / search",
+            "H/L seek · Ctrl-o loop · Tab/Shift-Tab cycle tabs · / search",
             "a append · d download · D delete queue · c clear · u undo · Ctrl-r redo",
             "f find Queue song · n/N next/previous match · s shuffle Queue",
             "Ctrl-d current download · x/y/z cut/copy/paste playlists",
@@ -1743,8 +1840,10 @@ class PlaylistTUI:
         elif self.tab == 1:
             if self.player.queue:
                 self.queue_index = (self.queue_index + delta) % len(self.player.queue)
-        elif getattr(self, "suggestions", []):
+        elif self.tab == 2 and getattr(self, "suggestions", []):
             self.result_index = (self.result_index + delta) % len(self.suggestions)
+        elif self.tab == 3 and getattr(self, "history_results", []):
+            self.history_index = (self.history_index + delta) % len(self.history_results)
 
     def move_search_result(self, delta: int) -> None:
         """Move only within the current search result list."""
@@ -1766,8 +1865,10 @@ class PlaylistTUI:
             self.result_index = max(0, len(self.results) - 1) if bottom else 0
         elif self.tab == 1:
             self.queue_index = max(0, len(self.player.queue) - 1) if bottom else 0
-        else:
+        elif self.tab == 2:
             self.result_index = max(0, len(getattr(self, "suggestions", [])) - 1) if bottom else 0
+        else:
+            self.history_index = max(0, len(getattr(self, "history_results", [])) - 1) if bottom else 0
 
     def move_to_edge_playlists(self, bottom: bool = False) -> None:
         if self.active_playlist_id is None:
@@ -2110,6 +2211,8 @@ class PlaylistTUI:
                     self.player.start(track, build_mix=False)
             elif self.tab == 2 and getattr(self, "suggestions", []):
                 self.player.start(self.suggestions[self.result_index])
+            elif self.tab == 3 and getattr(self, "history_results", []):
+                self.player.start(self.history_results[self.history_index])
         elif key == ord(" "):
             self.player.mpv.toggle_pause()
         elif key == ord("h"):
@@ -2123,7 +2226,7 @@ class PlaylistTUI:
         elif key == 15:
             self.player.toggle_loop()
         elif key == 9:
-            self.tab = (self.tab + 1) % 3
+            self.tab = (self.tab + 1) % 4
             self.clear_visual()
         elif key == ord("/"):
             self.prompt_search()
@@ -2153,7 +2256,7 @@ class PlaylistTUI:
         elif key == ord("p"):
             self.prompt_playlist_number()
         elif key == ord("v"):
-            self.toggle_visual("results" if self.tab == 0 else "queue" if self.tab == 1 else "suggestions")
+            self.toggle_visual("results" if self.tab == 0 else "queue" if self.tab == 1 else "suggestions" if self.tab == 2 else "history")
         elif key == 4:
             self.download_current()
 
@@ -2273,8 +2376,12 @@ class PlaylistTUI:
         if key == ord("/"):
             self.prompt_search()
             return
+        if is_backtab(key):
+            self.tab = (self.tab - 1) % 4
+            self.clear_visual()
+            return
         if key == 9:
-            self.tab = (self.tab + 1) % 3
+            self.tab = (self.tab + 1) % 4
             self.clear_visual()
             return
         if key == ord("s") and self.tab == 1:

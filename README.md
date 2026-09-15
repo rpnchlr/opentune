@@ -6,12 +6,14 @@ It is deliberately small: OpenTune streams audio, with optional local downloads,
 and does not require a browser, YouTube account, or separate media library.
 Playback happens in a full-screen terminal UI (TUI).
 
-## v0.9.0
+## v0.9.1
 
 This release adds persistent listening-history recommendations, a Suggestions
 home tab, continuously replenished queues, live search suggestions with cursor
 editing, playlist cut/copy/paste, clearer download/delete keybinds, and a
-one-time post-update support notice.
+one-time post-update support notice. It also adds a dedicated History tab,
+backward tab navigation, faster history-first search suggestions, and stricter
+song-title matching.
 
 ## What it can do
 
@@ -184,7 +186,7 @@ pipx install opentune
 pipx upgrade opentune
 ```
 
-OpenTune v0.9.0 includes an installer hook for the short thank-you/support
+OpenTune v0.9.1 includes an installer hook for the short thank-you/support
 message (direct legacy installs and verbose pip builds show it; standard pip may
 hide build-hook output). On the first launch after a new release, the same
 message appears in a floating modal;
@@ -233,7 +235,7 @@ opentune --help
 3. Move with `j`/`k` or `↓`/`↑`.
 4. Press `Enter` to start the highlighted result.
 5. The title and time appear at the top of the screen.
-6. OpenTune prepares and continuously replenishes a YouTube radio-style mix in the background. Press `Tab` to view it in the **Queue** tab, then again for **Suggestions**.
+6. OpenTune prepares and continuously replenishes a YouTube radio-style mix in the background. Press `Tab` to view **Queue**, **Suggestions**, and **History**, or `Shift+Tab` to move backward.
 7. Press `q` to quit. `Esc` cancels prompts/visual mode; press it twice quickly
    in Queue or an open playlist to clear its find query.
 
@@ -253,7 +255,8 @@ opentune --help
 | `H` (`Shift+h`) | Rewind 10 seconds |
 | `L` (`Shift+l`) | Forward 10 seconds |
 | `Ctrl-o` | Toggle looping of the current track from any window |
-| `Tab` | Switch between **Results**, **Queue**, and **Suggestions** |
+| `Tab` | Move forward through **Results**, **Queue**, **Suggestions**, and **History** |
+| `Shift+Tab` | Move backward through the home tabs |
 | `/` | Open a search prompt from any window |
 | `f` (Queue tab) | Find and highlight a song in the Queue without filtering it |
 | `n` / `N` (Queue tab) | Jump to the next / previous match; status shows `[current/total]` |
@@ -276,14 +279,14 @@ opentune --help
 | `Esc` in a prompt or visual mode | Cancel the prompt or visual selection |
 | `Esc` twice in Queue | Clear the active Queue find query |
 | `Esc` twice in an open playlist | Clear the active playlist find query |
-| `Esc` in help | Close the help overlay or the v0.9.0 update notice |
+| `Esc` in help | Close the help overlay or the v0.9.1 update notice |
 | `q` | Quit OpenTune (the only quit key) |
 
 ## Results, playback, and the queue
 
 ### Results tab
 
-The Results tab contains the latest YouTube search. Each row shows its title, channel/uploader when available, and duration. Press `Enter` to play a result. Use `[` and `]` to move through the current search results without changing the playing track; `h` and `l` remain music navigation. Choosing a new search result replaces the current track and adds the former track to playback history, allowing `h` to go back. While typing in `/`, OpenTune requests live music suggestions; recent matching history entries are marked `[history]` and use fuzzy matching. Use Up/Down to choose a suggestion or Tab to complete it.
+The Results tab contains the latest YouTube search. Each row shows its title, channel/uploader when available, and duration. Press `Enter` to play a result. Use `[` and `]` to move through the current search results without changing the playing track; `h` and `l` remain music navigation. Choosing a new search result replaces the current track and adds the former track to playback history, allowing `h` to go back. While typing in `/`, OpenTune shows matching history immediately and requests additional YouTube music results in the background. Recent matching history entries are marked `[history]`; matching prioritizes song titles and uses the artist only as a fallback. Use Up/Down to choose a suggestion or Tab to complete it.
 
 ### Queue tab
 
@@ -304,10 +307,17 @@ continues playback automatically. Quitting with `q` stops replenishment.
 
 ### Suggestions tab
 
-The Suggestions tab contains recent unique songs from the persisted listening
-history. Starting a song records it immediately in `~/Music/opentune/history.json`;
-the list is refreshed as playback continues and is available after restarting
-OpenTune.
+The Suggestions tab becomes available immediately after the first recorded
+song. It starts with recent history-based seeds, then asks YouTube for a
+related music mix based on the most recent song and appends those tracks in the
+background. If it is empty, play at least one song and wait briefly for the
+related mix to load.
+
+### History tab
+
+The History tab shows saved listening history directly, newest first. Starting
+a song records it immediately in `~/Music/opentune/history.json`, and the list
+remains available after restarting OpenTune.
 
 Undo and redo are intentionally limited to queue deletion and queue clearing.
 Playback, search, pause, seeking, looping, and adding tracks are not recorded

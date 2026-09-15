@@ -4,7 +4,16 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from opentune.__main__ import Downloader, MPV, PlaylistStore, PlaylistTUI, Track, YouTube, format_time
+from opentune.__main__ import (
+    Downloader,
+    HistoryStore,
+    MPV,
+    PlaylistStore,
+    PlaylistTUI,
+    Track,
+    YouTube,
+    format_time,
+)
 
 
 class OpenTuneTests(unittest.TestCase):
@@ -17,6 +26,71 @@ class OpenTuneTests(unittest.TestCase):
     def test_track_label(self):
         self.assertEqual(Track("Song", "https://example.test", uploader="Artist").label, "Song — Artist")
         self.assertEqual(Track("Song", "https://example.test").label, "Song")
+
+    def test_history_search_prefers_song_title_and_persists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            history = HistoryStore(Path(directory))
+            history.record(Track("Daft Punk - Get Lucky", "get", uploader="Daft Punk"))
+            history.record(Track("Radiohead - Creep", "creep", uploader="Radiohead"))
+            reloaded = HistoryStore(Path(directory))
+            self.assertEqual(reloaded.search("dft")[0].url, "get")
+            self.assertEqual(reloaded.search("crep")[0].url, "creep")
+            self.assertEqual([track.url for track in reloaded.tracks()], ["creep", "get"])
+
+    def test_youtube_suggestions_keep_title_or_artist_matches(self):
+        candidates = [
+            Track("Daft Punk - Get Lucky", "get", uploader="Daft Punk"),
+            Track("Random Related Song", "random", uploader="Other Artist"),
+            Track("Daft Punk - One More Time", "one-more", uploader="Daft Punk"),
+        ]
+        with patch.object(YouTube, "search", return_value=candidates):
+            suggestions = YouTube.suggestions("dft", limit=5)
+        self.assertEqual([track.url for track in suggestions], ["get", "one-more"])
+
+    def test_home_tabs_cycle_forward_and_backward(self):
+        tui = PlaylistTUI.__new__(PlaylistTUI)
+        tui.tab = 0
+        tui.showing_help = False
+        tui.visual_mode = False
+        tui.visual_anchor = None
+        tui._last_escape_at = 0.0
+        tui.handle(9)
+        tui.handle(9)
+        tui.handle(9)
+        self.assertEqual(tui.tab, 3)
+        tui.handle(353)  # Shift-Tab / curses.KEY_BTAB on common terminals.
+        self.assertEqual(tui.tab, 2)
+
+    def test_delete_confirmation_accepts_yes_and_enter(self):
+        class ScreenStub:
+            def __init__(self, key):
+                self.key = key
+
+            def getmaxyx(self):
+                return (24, 80)
+
+            def nodelay(self, value):
+                pass
+
+            def move(self, *args):
+                pass
+
+            def clrtoeol(self):
+                pass
+
+            def addnstr(self, *args):
+                pass
+
+            def refresh(self):
+                pass
+
+            def getch(self):
+                return self.key
+
+        for key in (ord("y"), 10):
+            tui = PlaylistTUI.__new__(PlaylistTUI)
+            tui.screen = ScreenStub(key)
+            self.assertTrue(tui.prompt_confirm("Delete?"))
 
     def test_mix_uses_youtube_radio_and_removes_duplicate_song_uploads(self):
         seed = Track("Artist - Seed Song (Official Video)", "https://www.youtube.com/watch?v=seed", uploader="Artist")
