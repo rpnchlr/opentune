@@ -6,19 +6,29 @@ It is deliberately small: OpenTune streams audio, with optional local downloads,
 and does not require a browser, YouTube account, or separate media library.
 Playback happens in a full-screen terminal UI (TUI).
 
+## v0.9.0
+
+This release adds persistent listening-history recommendations, a Suggestions
+home tab, continuously replenished queues, live search suggestions with cursor
+editing, playlist cut/copy/paste, clearer download/delete keybinds, and a
+one-time post-update support notice.
+
 ## What it can do
 
 - Search YouTube from the command line: `opentune <music name>`
 - Show several matching tracks with artist/channel and duration
 - Play, pause, go to the next/previous track, seek, and loop a track
 - Use Vim-like navigation (`h`, `j`, `k`, `l`) as well as arrow keys
-- Create a short related mix after you choose a song
-- Show the upcoming mix in a Queue tab
+- Create a continuously replenished related mix after you choose a song
+- Show the upcoming mix in Queue and history-based recommendations in Suggestions
 - Create persistent playlists in a right-side terminal pane
 - Download tracks to a pinned local Downloads playlist
 - Search and edit playlist contents without affecting the playback queue
 - Mark contiguous songs with visual mode (`v`) for bulk queue/playlist actions
 - Prefer downloaded local files automatically when a matching song is played
+- Save listening history and use it to populate the Suggestions tab
+- Cut, copy, and paste songs between playlists
+- Show live music suggestions while editing a search query
 - Loop an entire open playlist with `o`
 - Display the playing title, elapsed time, total duration, and playback state
 
@@ -33,7 +43,9 @@ OpenTune coordinates two established command-line programs:
 5. In the background, OpenTune asks YouTube for its radio/mix playlist seeded by the selected video, then filters alternate uploads of the same song before filling the queue. If YouTube does not expose a radio playlist, OpenTune falls back to other songs from the selected artist.
 
 Search, first-time stream playback, and mix generation need an active internet
-connection. `Ctrl-d` optionally saves audio locally for offline playback.
+connection. `d` saves the highlighted song and `Ctrl-d` saves the currently
+playing song locally for offline playback. Search prompts support arrow keys,
+Ctrl-left/Ctrl-right, Home/End, and live suggestions.
 Searches run in the background, so pane focus, tabs, playback, seeking, and
 loop controls remain responsive while YouTube results load.
 
@@ -172,6 +184,12 @@ pipx install opentune
 pipx upgrade opentune
 ```
 
+OpenTune v0.9.0 includes an installer hook for the short thank-you/support
+message (direct legacy installs and verbose pip builds show it; standard pip may
+hide build-hook output). On the first launch after a new release, the same
+message appears in a floating modal;
+press `Esc` to dismiss it. The notice is shown once per installed version.
+
 Maintainers can follow [the PyPI release guide](docs/PYPI_RELEASE.md) to configure Trusted Publishing and publish releases.
 
 ### Run without installing
@@ -215,7 +233,7 @@ opentune --help
 3. Move with `j`/`k` or `↓`/`↑`.
 4. Press `Enter` to start the highlighted result.
 5. The title and time appear at the top of the screen.
-6. OpenTune prepares a YouTube radio-style mix in the background. Press `Tab` to view it in the **Queue** tab.
+6. OpenTune prepares and continuously replenishes a YouTube radio-style mix in the background. Press `Tab` to view it in the **Queue** tab, then again for **Suggestions**.
 7. Press `q` to quit. `Esc` cancels prompts/visual mode; press it twice quickly
    in Queue or an open playlist to clear its find query.
 
@@ -226,6 +244,7 @@ opentune --help
 | `j` or `↓` | Move selection down (wraps from bottom to top) |
 | `k` or `↑` | Move selection up (wraps from top to bottom) |
 | `g` / `G` | Jump to the top / bottom of the current list |
+| `[` / `]` | Move to the previous / next item in the current Results search |
 | `Ctrl-b` / `Ctrl-f` | Move half a page up / down |
 | `Enter` | Play the selected result or queue item |
 | `Space` | Pause or resume playback from any window |
@@ -234,7 +253,7 @@ opentune --help
 | `H` (`Shift+h`) | Rewind 10 seconds |
 | `L` (`Shift+l`) | Forward 10 seconds |
 | `Ctrl-o` | Toggle looping of the current track from any window |
-| `Tab` | Switch between **Results** and **Queue** |
+| `Tab` | Switch between **Results**, **Queue**, and **Suggestions** |
 | `/` | Open a search prompt from any window |
 | `f` (Queue tab) | Find and highlight a song in the Queue without filtering it |
 | `n` / `N` (Queue tab) | Jump to the next / previous match; status shows `[current/total]` |
@@ -242,27 +261,29 @@ opentune --help
 | `a` | Append the focused result/queue track to the Queue without playing it |
 | `s` (Queue tab) | Shuffle only the temporary Queue; saved playlists are unchanged |
 | `v` | Enter/leave visual selection; extend the selection with `j`/`k` |
-| `d` | Delete the selected track(s) from the Queue |
-| `c` | Clear the Queue |
+| `d` | Download the highlighted result, queue item, suggestion, or playlist song |
+| `D` | Delete selected queue/playlist songs or a playlist after confirmation |
+| `c` | Clear the Queue after `y`/`n`/Enter confirmation |
 | `u` | Undo the last queue deletion or clear |
 | `Ctrl-r` | Redo the last undone queue deletion or clear |
 | `pN` | Add the focused result/queue track to user playlist number `N` |
 | `pcN` | Add the currently playing track to user playlist number `N` |
-| `Ctrl-d` | Download the currently playing track to Downloads |
+| `Ctrl-d` | Download the currently playing track (or focused playlist song if idle) |
+| `x` / `y` / `z` | Cut / copy / paste selected songs in an open playlist |
 | `P` | Toggle the Playlists pane |
 | `Ctrl-h` / `Ctrl-l` or `Ctrl-Left/Right` | Cycle focus between panes (wraps) |
 | `?` | Open/close the in-player key reference |
 | `Esc` in a prompt or visual mode | Cancel the prompt or visual selection |
 | `Esc` twice in Queue | Clear the active Queue find query |
 | `Esc` twice in an open playlist | Clear the active playlist find query |
-| `Esc` in help | Close the help overlay |
+| `Esc` in help | Close the help overlay or the v0.9.0 update notice |
 | `q` | Quit OpenTune (the only quit key) |
 
 ## Results, playback, and the queue
 
 ### Results tab
 
-The Results tab contains the latest YouTube search. Each row shows its title, channel/uploader when available, and duration. Press `Enter` to play a result. Choosing a new search result replaces the current track and adds the former track to playback history, allowing `h` to go back.
+The Results tab contains the latest YouTube search. Each row shows its title, channel/uploader when available, and duration. Press `Enter` to play a result. Use `[` and `]` to move through the current search results without changing the playing track; `h` and `l` remain music navigation. Choosing a new search result replaces the current track and adds the former track to playback history, allowing `h` to go back. While typing in `/`, OpenTune requests live music suggestions; recent matching history entries are marked `[history]` and use fuzzy matching. Use Up/Down to choose a suggestion or Tab to complete it.
 
 ### Queue tab
 
@@ -271,12 +292,22 @@ Selecting a search result starts a YouTube radio-style mix. OpenTune filters dup
 - Press `l` to start the next queued track.
 - Highlight a queued track and press `Enter` to jump directly to it.
 - Press `a` on a search result to append it without interrupting playback.
-- Press `d` to remove the highlighted queue item, or `c` to clear the whole queue.
+- Press `D` to remove highlighted queue item(s) after a `y`/`n`/Enter confirmation, or `c` to clear the whole queue.
 - Press `u` to undo the latest deletion/clear, or `Ctrl-r` to redo it.
 - Press `f` to find and highlight a queue song without changing the queue.
 - Press `n`/`N` to move to the next/previous match; matches wrap around and
   the status line reports their position as `[current/total]`.
 - Use `Tab` to return to Results.
+
+When the queue reaches its end, OpenTune requests another related batch and
+continues playback automatically. Quitting with `q` stops replenishment.
+
+### Suggestions tab
+
+The Suggestions tab contains recent unique songs from the persisted listening
+history. Starting a song records it immediately in `~/Music/opentune/history.json`;
+the list is refreshed as playback continues and is available after restarting
+OpenTune.
 
 Undo and redo are intentionally limited to queue deletion and queue clearing.
 Playback, search, pause, seeking, looping, and adding tracks are not recorded
@@ -334,7 +365,9 @@ Downloaded audio files are stored in:
 | `pcN` | Add the currently playing track to user playlist `N` |
 | `f` | Find and highlight a playlist song by title or uploader (no filtering) |
 | `n` / `N` | Jump to the next / previous match; status shows `[current/total]` |
-| `D` (`Shift+d`) | Permanently delete the focused song(s) after confirmation |
+| `d` | Download the focused song |
+| `D` (`Shift+d`) | Permanently delete the focused song(s) after `y`/`n`/Enter confirmation |
+| `x` / `y` / `z` | Cut / copy / paste selected songs into the open destination playlist |
 | `o` | Toggle looping of the current playlist |
 | `P` | Toggle the pane without closing the playlist |
 
@@ -358,13 +391,13 @@ user-playlist number. For example, `p3` adds the focused track to user playlist
 `3`. Inside an open playlist, `p3` adds the selected playlist song(s) to user
 playlist `3`; use `pc3` to add the currently playing track. Downloads is not a
 numbered target and cannot receive songs through `pN`/`pcN`; it is populated
-only by successful `Ctrl-d` downloads. User playlists store the YouTube URL and
+only by successful `d`/`Ctrl-d` downloads. User playlists store the YouTube URL and
 metadata; they do not download the song.
 
 ### Downloads
 
-Focus a currently playing track in the main window and press `Ctrl-d`, or open
-a playlist, focus one of its songs, and press `Ctrl-d`. OpenTune uses `yt-dlp`
+Press `d` on a highlighted song, or `Ctrl-d` for the currently playing song
+(and the focused playlist song when idle). OpenTune uses `yt-dlp`
 and `ffmpeg` to save an MP3 under `~/Music/opentune/Downloads/` and adds it to
 the pinned Downloads playlist. Deleting a Downloads entry after confirmation
 also removes its local audio file permanently.

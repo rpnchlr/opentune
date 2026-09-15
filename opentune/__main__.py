@@ -24,6 +24,19 @@ from . import __version__
 
 SEARCH_LIMIT = 12
 MIX_LIMIT = 10
+PROJECT_URL = "https://github.com/rpnchlr/opentune"
+INSTALL_MESSAGE = (
+    "Thank you for installing OpenTune! Consider supporting the creator by "
+    f"starring or sponsoring the project: {PROJECT_URL}"
+)
+UPDATE_NOTICE_LINES = (
+    "Thank you for using OpenTune!",
+    "OpenTune v0.9.0 is now installed.",
+    "Consider supporting the creator by starring or sponsoring:",
+    PROJECT_URL,
+    "",
+    "Press Esc to close this message.",
+)
 NON_MUSIC_TERMS = re.compile(
     r"\b(?:podcast|interview|reaction|review|news|tutorial|gameplay|walkthrough|"
     r"vlog|documentary|trailer|short film|comedy|stand[- ]?up|webinar|lecture|"
@@ -48,6 +61,7 @@ Main window keys:
   j / Down       Select next result or queue track
   k / Up         Select previous result or queue track
   g / G           Jump to top / bottom of the current list
+  [ / ]           Previous / next item in the Results search list
   Ctrl-b / Ctrl-f Move half a page up / down
   Enter          Play the selected track
   Space          Pause or resume (works from any window)
@@ -55,20 +69,22 @@ Main window keys:
   H / L          Rewind / forward 10 seconds
   Shift-Left/Right Rewind / forward 10 seconds
   Ctrl-o         Toggle looping for the current track (any window)
-  Tab            Switch between Results and Queue
+  Tab            Switch between Results, Queue, and Suggestions
   /              Search YouTube from any window
   f              Find and highlight a song in the Queue (Queue tab)
   n / N          Next / previous Queue match after using f
   a              Append the focused result/queue track to the Queue
   s              Shuffle the Queue (Queue tab only)
   v              Start/stop visual selection; extend with j/k
-  d              Delete selected track(s) from the Queue
-  c              Clear the Queue
+  d              Download the highlighted song
+  D              Delete selected queue track(s) (confirm with y/n/Enter)
+  c              Clear the Queue (confirm with y/n/Enter)
   u              Undo the last queue delete/clear
   Ctrl-r         Redo the last undone queue delete/clear
   pN              Add focused result/queue track to user playlist N
   pcN             Add the currently playing track to user playlist N
   Ctrl-d         Download the currently playing track
+  x / y / z      Cut / copy / paste selected songs in an open playlist
   P              Toggle the Playlists window
   Ctrl-h/l or Ctrl-Left/Right Cycle focus between panes (when open)
   ?              Toggle this key reference in the TUI
@@ -83,7 +99,7 @@ Playlists window keys:
   Space          Pause or resume (works from any window)
   H / L          Rewind / forward 10 seconds (works from any window)
   Shift-Left/Right Rewind / forward 10 seconds (works from any window)
-  Tab            Switch between Results and Queue (works from any window)
+  Tab            Switch between Results, Queue, and Suggestions (any window)
   /              Search YouTube (works from any window)
   f              Find and highlight a song in the open playlist
   n / N          Next / previous playlist match after using f
@@ -95,9 +111,11 @@ Playlists window keys:
   pcN             Add the currently playing track to user playlist N
   p              Pin/unpin the focused playlist (playlist list only)
   r              Rename the focused playlist
+  d              Download the highlighted song
   D              Delete selected song(s), or focused playlist (confirm first)
-  Ctrl-d         Download the focused song (open playlist only), or the
-                 currently playing song from the main window
+  Ctrl-d         Download the currently playing song (or the focused playlist
+                 song when nothing is playing)
+  x / y / z      Cut / copy / paste selected songs between playlists
   Ctrl-o         Toggle looping (works from any window)
   o              Toggle looping of the open playlist
   v              Start/stop visual selection; extend with j/k
@@ -107,15 +125,17 @@ Playlist notes:
   Downloads has no user-playlist index. pN/pcN target user playlists only.
   Pinned user playlists stay above unpinned playlists.
   Esc cancels prompts, visual selection, or the help overlay; it never quits.
+  Deletion prompts accept y, n, or Enter (Enter means yes).
   Press Esc twice quickly in Queue or an open playlist to clear its find query.
   Find matches use a secondary color and show their position as [current/total].
   Visual selections support bulk queue/playlist operations. Undo/redo do not
   apply to playlist song changes.
 
 OpenTune requires mpv and yt-dlp. It streams audio and optionally downloads
-tracks with Ctrl-d. Selecting a result creates a YouTube radio-style mix,
-shown in the Queue tab. Only music-like results are kept; use `a` to append
-a search result without starting it."""
+tracks with d/Ctrl-d. Selecting a result creates a continuously replenished
+YouTube radio-style mix, shown in the Queue tab. Suggestions are based on
+your saved listening history. Only music-like results are kept; use `a` to
+append a search result without starting it."""
 
 
 @dataclass(frozen=True)
@@ -140,6 +160,29 @@ def format_time(seconds: float | int | None) -> str:
     minutes, seconds = divmod(total, 60)
     hours, minutes = divmod(minutes, 60)
     return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
+
+
+def fuzzy_score(query: str, candidate: str) -> int | None:
+    """Score a small fuzzy match; higher scores are better."""
+    query = re.sub(r"\s+", "", query.lower())
+    candidate = candidate.lower()
+    if not query:
+        return 0
+    if query in candidate:
+        return 1000 - candidate.index(query)
+    cursor = -1
+    gaps = 0
+    first = None
+    for character in query:
+        position = candidate.find(character, cursor + 1)
+        if position < 0:
+            return None
+        if first is None:
+            first = position
+        if cursor >= 0:
+            gaps += position - cursor - 1
+        cursor = position
+    return 700 - (first or 0) * 2 - gaps
 
 
 def require_tools() -> str | None:
@@ -360,6 +403,109 @@ class QueueAction:
     indices: tuple[int, ...] = ()
 
 
+class HistoryStore:
+    """Persist recent listening history and expose history-based suggestions."""
+
+    def __init__(self, root: Path | None = None) -> None:
+        base = Path(root) if root else Path.home() / "Music" / "opentune"
+        base.mkdir(parents=True, exist_ok=True)
+        self.path = base / "history.json"
+        self._entries: list[dict[str, Any]] = []
+        self._load()
+
+    @staticmethod
+    def _track_from_json(data: dict[str, Any]) -> Track:
+        return Track(
+            title=str(data.get("title") or "Untitled"),
+            url=str(data.get("url") or ""),
+            duration=int(data.get("duration") or 0),
+            uploader=str(data.get("uploader") or ""),
+            local_path=str(data.get("local_path") or ""),
+        )
+
+    @staticmethod
+    def _track_to_json(track: Track) -> dict[str, Any]:
+        return {
+            "title": track.title,
+            "url": track.url,
+            "duration": track.duration,
+            "uploader": track.uploader,
+            "local_path": track.local_path,
+        }
+
+    def _load(self) -> None:
+        if not self.path.exists():
+            return
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        self._entries = [item for item in raw if isinstance(item, dict) and item.get("url")] if isinstance(raw, list) else []
+
+    def _save(self) -> None:
+        temporary = self.path.with_name(f".{self.path.name}.tmp")
+        try:
+            temporary.write_text(json.dumps(self._entries[:200], indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            temporary.replace(self.path)
+        except OSError:
+            temporary.unlink(missing_ok=True)
+
+    def record(self, track: Track) -> None:
+        self._entries = [item for item in self._entries if item.get("url") != track.url]
+        self._entries.insert(0, {**self._track_to_json(track), "played_at": int(time.time())})
+        self._save()
+
+    def tracks(self) -> list[Track]:
+        return [self._track_from_json(item) for item in self._entries]
+
+    def recommendations(self, limit: int = SEARCH_LIMIT) -> list[Track]:
+        """Return recent unique listening-history tracks for the Home tab."""
+        tracks: list[Track] = []
+        seen: set[str] = set()
+        for track in self.tracks():
+            if track.url not in seen:
+                tracks.append(track)
+                seen.add(track.url)
+            if len(tracks) >= limit:
+                break
+        return tracks
+
+    def search(self, query: str, limit: int = 5) -> list[Track]:
+        """Return history entries matching a search using lightweight fuzzy scoring."""
+        ranked: list[tuple[int, int, Track]] = []
+        for recency, track in enumerate(self.tracks()):
+            candidate = f"{track.title} {track.uploader}"
+            score = fuzzy_score(query, candidate)
+            if score is not None:
+                ranked.append((score, -recency, track))
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return [track for _, _, track in ranked[:limit]]
+
+
+class NoticeState:
+    """Remember which release's one-time welcome/update notice was dismissed."""
+
+    def __init__(self, path: Path | None = None) -> None:
+        config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "opentune"
+        self.path = Path(path) if path else config / "state.json"
+
+    def last_seen_version(self) -> str:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            return str(data.get("last_seen_version") or "")
+        except (OSError, json.JSONDecodeError):
+            return ""
+
+    def mark_seen(self) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_name(f".{self.path.name}.tmp")
+            temporary.write_text(json.dumps({"last_seen_version": __version__}) + "\n", encoding="utf-8")
+            temporary.replace(self.path)
+        except OSError:
+            pass
+
+
 class Player:
     def __init__(self) -> None:
         self.current: Track | None = None
@@ -371,6 +517,9 @@ class Player:
         self.track_resolver: Callable[[Track], Track] | None = None
         self.message = "Ready. Press / to search."
         self.playback_failed = False
+        self.history_store: HistoryStore | None = None
+        self.continuous_queue = True
+        self._refill_pending = False
         self._queue_undo: list[QueueAction] = []
         self._queue_redo: list[QueueAction] = []
         self._lock = threading.Lock()
@@ -389,6 +538,8 @@ class Player:
                 self.history.append(self.current)
             self.current = track
             self.playback_failed = False
+            if self.history_store:
+                self.history_store.record(track)
             self.mpv.play(track, self.loop)
             self.message = f"Playing: {track.title}"
         if build_mix:
@@ -561,6 +712,43 @@ class Player:
             self.next()
         elif self.playlist_loop and self.current:
             self.start(self.current, build_mix=False)
+        elif self.continuous_queue and self.current:
+            self._refill_and_continue(self.current)
+
+    def _refill_and_continue(self, seed: Track) -> None:
+        """Fetch another radio batch when a continuously generated queue ends."""
+        with self._lock:
+            if self._refill_pending or not self.continuous_queue:
+                return
+            self._refill_pending = True
+
+        def worker() -> None:
+            try:
+                mix = YouTube.mix_for(seed)
+                with self._lock:
+                    if not self.continuous_queue or self.current is None or self.current.url != seed.url:
+                        return
+                    existing = {item.url for item in self.queue}
+                    existing_keys = {YouTube._track_key(item) for item in self.queue}
+                    for item in mix:
+                        key = YouTube._track_key(item)
+                        if item.url in existing or (key and key in existing_keys):
+                            continue
+                        self.queue.append(item)
+                        existing.add(item.url)
+                        if key:
+                            existing_keys.add(key)
+                    self.message = f"Queue replenished: {len(self.queue)} tracks queued" if mix else "No more songs were found"
+                    should_continue = bool(self.queue)
+                if should_continue:
+                    self.next()
+            except RuntimeError:
+                pass
+            finally:
+                with self._lock:
+                    self._refill_pending = False
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def toggle_loop(self) -> None:
         self.loop = not self.loop
@@ -568,6 +756,7 @@ class Player:
         self.message = f"Loop {'on' if self.loop else 'off'}"
 
     def close(self) -> None:
+        self.continuous_queue = False
         self.mpv.close()
 
 
@@ -925,6 +1114,7 @@ class TUI:
         self.screen.hline(5, 0, curses.ACS_HLINE, width)
         tabs = "[ Results ]" if self.tab == 0 else "  Results  "
         tabs += "     " + ("[ Queue ]" if self.tab == 1 else "  Queue  ")
+        tabs += "     " + ("[ Suggestions ]" if self.tab == 2 else "  Suggestions  ")
         self.screen.addnstr(6, 2, tabs, width - 4, curses.A_BOLD)
         list_height = max(1, height - 10)
         if self.showing_help:
@@ -945,12 +1135,12 @@ class TUI:
             "j / ↓    down       k / ↑    up        Enter    play selection",
             "Space    pause/play h        previous  l        next",
             "H        rewind 10s L        forward 10s Ctrl-o   toggle loop",
-            "Tab      Results/Queue       /        search     a        add to Queue",
-            "d        delete from Queue  c        clear Queue u        undo",
+            "Tab      Results/Queue/Suggestions  / search   a add to Queue",
+            "d download focused song  D delete Queue  c clear Queue (confirm)",
             "Ctrl-r   redo               ?        this help    q        quit",
             "Esc      cancel search (in prompt)",
             "",
-            "Selecting a result starts playback and prepares a YouTube radio mix.",
+            "Selecting a result starts playback and continuously replenishes its radio mix.",
         ]
         for index, line in enumerate(lines[:height]):
             attr = curses.A_BOLD if index == 0 else curses.A_NORMAL
@@ -1046,7 +1236,10 @@ class PlaylistTUI:
     def __init__(self, screen: curses.window, player: Player, store: PlaylistStore, initial_query: str = "") -> None:
         self.screen, self.player, self.store = screen, player, store
         self.player.track_resolver = self.store.resolve_track
+        self.history_store = HistoryStore(store.root.parent)
+        self.player.history_store = self.history_store
         self.results: list[Track] = []
+        self.suggestions: list[Track] = self.history_store.recommendations()
         self.result_index = 0
         self.queue_index = 0
         self.tab = 0
@@ -1061,6 +1254,9 @@ class PlaylistTUI:
         self.queue_search = ""
         self.visual_mode = False
         self.visual_anchor: tuple[str, int] | None = None
+        self.clipboard_tracks: list[Track] = []
+        self.clipboard_mode = ""
+        self.clipboard_source_id: str | None = None
         self._last_escape_at = 0.0
         self._search_generation = 0
         self.searching = False
@@ -1111,19 +1307,71 @@ class PlaylistTUI:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def prompt_line(self, label: str) -> str | None:
+    def prompt_line(self, label: str, suggest: bool = False) -> str | None:
         height, width = self.screen.getmaxyx()
         self.screen.nodelay(True)
         self.screen.timeout(50)
         curses.curs_set(1)
         chars: list[str] = []
+        cursor = 0
+        suggestions: list[Track] = []
+        suggestion_index = 0
+        suggestion_query = ""
+        suggestion_generation = 0
         cancelled = False
+
+        def request_suggestions(query: str) -> None:
+            nonlocal suggestion_generation
+            suggestion_generation += 1
+            generation = suggestion_generation
+            if len(query.strip()) < 2:
+                suggestions.clear()
+                return
+
+            def worker() -> None:
+                time.sleep(0.25)
+                if generation != suggestion_generation:
+                    return
+                history_matches = self.history_store.search(query) if suggest and hasattr(self, "history_store") else []
+                suggestions[:] = history_matches
+                try:
+                    found = YouTube.search(query, limit=5)
+                except RuntimeError:
+                    found = []
+                if generation == suggestion_generation:
+                    known = {track.url for track in suggestions}
+                    suggestions.extend(track for track in found if track.url not in known)
+
+            threading.Thread(target=worker, daemon=True).start()
+
         try:
             while True:
+                query_text = "".join(chars)
+                if suggest and query_text != suggestion_query:
+                    suggestion_query = query_text
+                    suggestion_index = 0
+                    request_suggestions(query_text)
                 self.screen.move(height - 1, 0)
                 self.screen.clrtoeol()
-                text = f"{label}: {''.join(chars)}"
+                prefix = f"{label}: "
+                available = max(1, width - len(prefix) - 1)
+                start = max(0, min(cursor - available + 1, len(chars) - available))
+                visible_query = "".join(chars[start:start + available])
+                text = prefix + visible_query
                 self.screen.addnstr(height - 1, 0, text, width - 1)
+                if suggest and suggestions:
+                    for offset, track in enumerate(suggestions[: min(5, height - 2)]):
+                        row = height - 2 - offset
+                        marker = "› " if offset == suggestion_index else "  "
+                        history_urls = {
+                            item.url for item in self.history_store.search(query_text)
+                        } if hasattr(self, "history_store") else set()
+                        source = "[history] " if track.url in history_urls else ""
+                        self.screen.move(row, 0)
+                        self.screen.clrtoeol()
+                        self.screen.addnstr(row, 0, self.clipped(f"{marker}{source}{track.label}", width - 1), width - 1, curses.A_DIM)
+                cursor_col = min(width - 1, len(prefix) + cursor - start)
+                self.screen.move(height - 1, cursor_col)
                 self.screen.refresh()
                 key = self.screen.getch()
                 if key < 0:
@@ -1132,17 +1380,55 @@ class PlaylistTUI:
                     cancelled = True
                     break
                 if key in (10, 13, curses.KEY_ENTER):
+                    if suggest and suggestions and suggestion_index < len(suggestions):
+                        chosen = suggestions[suggestion_index].title
+                        chars[:] = list(chosen)
+                        cursor = len(chars)
                     break
                 if key in (curses.KEY_BACKSPACE, 8, 127):
-                    if chars:
-                        chars.pop()
+                    if cursor:
+                        del chars[cursor - 1]
+                        cursor -= 1
+                elif key == getattr(curses, "KEY_DC", -999):
+                    if cursor < len(chars):
+                        del chars[cursor]
+                elif key in (curses.KEY_LEFT, 2):  # Left / Ctrl-b
+                    cursor = max(0, cursor - 1)
+                elif key in (curses.KEY_RIGHT, 6):  # Right / Ctrl-f
+                    cursor = min(len(chars), cursor + 1)
+                elif key in (curses.KEY_HOME,):
+                    cursor = 0
+                elif key in (curses.KEY_END,):
+                    cursor = len(chars)
+                elif key in (getattr(curses, "KEY_CLEFT", -999),):
+                    while cursor and chars[cursor - 1].isspace():
+                        cursor -= 1
+                    while cursor and not chars[cursor - 1].isspace():
+                        cursor -= 1
+                elif key in (getattr(curses, "KEY_CRIGHT", -999),):
+                    while cursor < len(chars) and chars[cursor].isspace():
+                        cursor += 1
+                    while cursor < len(chars) and not chars[cursor].isspace():
+                        cursor += 1
+                elif suggest and key in (curses.KEY_DOWN, curses.KEY_UP):
+                    if suggestions:
+                        step = 1 if key == curses.KEY_DOWN else -1
+                        suggestion_index = (suggestion_index + step) % len(suggestions)
+                elif key == 9 and suggest and suggestions:
+                    chosen = suggestions[suggestion_index].title
+                    chars[:] = list(chosen)
+                    cursor = len(chars)
                 elif 32 <= key <= 126:
-                    chars.append(chr(key))
+                    chars.insert(cursor, chr(key))
+                    cursor += 1
                 else:
                     self.handle_prompt_control(key)
         finally:
             self.screen.move(height - 1, 0)
             self.screen.clrtoeol()
+            for row in range(max(0, height - min(5, height - 2) - 1), height - 1):
+                self.screen.move(row, 0)
+                self.screen.clrtoeol()
             self.screen.refresh()
         curses.curs_set(0)
         self.screen.timeout(0)
@@ -1171,7 +1457,7 @@ class PlaylistTUI:
         self.draw()
 
     def prompt_search(self) -> None:
-        query = self.prompt_line("Search")
+        query = self.prompt_line("Search", suggest=True)
         if query is None:
             self.player.message = "Search cancelled"
         elif query:
@@ -1211,9 +1497,16 @@ class PlaylistTUI:
         self.screen.nodelay(False)
         self.screen.move(height - 1, 0)
         self.screen.clrtoeol()
-        self.screen.addnstr(height - 1, 0, f"{message} [1. yes / 2. no]", width - 1)
+        self.screen.addnstr(height - 1, 0, f"{message} [y/Enter yes · n no]", width - 1)
         self.screen.refresh()
-        key = self.screen.getch()
+        while True:
+            key = self.screen.getch()
+            if key in (ord("y"), ord("Y"), 10, 13, curses.KEY_ENTER):
+                answer = True
+                break
+            if key in (ord("n"), ord("N"), 27, 3):
+                answer = False
+                break
         self.screen.nodelay(True)
         self.screen.move(height - 1, 0)
         self.screen.clrtoeol()
@@ -1225,14 +1518,20 @@ class PlaylistTUI:
             return self.results[self.result_index]
         if self.tab == 1 and self.player.queue:
             return self.player.queue[self.queue_index]
+        if self.tab == 2:
+            suggestions = getattr(self, "suggestions", [])
+            if suggestions:
+                return suggestions[self.result_index]
         return None
 
     def focused_main_tracks(self) -> list[Track]:
         if self.tab == 0:
             indices = self.selected_indices_for("main")
             return [self.results[index] for index in sorted(indices) if 0 <= index < len(self.results)]
-        indices = self.selected_indices_for("main")
-        return [self.player.queue[index] for index in sorted(indices) if 0 <= index < len(self.player.queue)]
+        if self.tab == 1:
+            indices = self.selected_indices_for("main")
+            return [self.player.queue[index] for index in sorted(indices) if 0 <= index < len(self.player.queue)]
+        return [self.suggestions[index] for index in sorted(self.selected_indices_for("main")) if 0 <= index < len(self.suggestions)]
 
     def current_playlist(self) -> Playlist | None:
         if self.active_playlist_id is None:
@@ -1304,19 +1603,19 @@ class PlaylistTUI:
         if focus_name == "playlists":
             return "playlist"
         if focus_name == "main":
-            return "results" if self.tab == 0 else "queue"
+            return ("results" if self.tab == 0 else "queue" if self.tab == 1 else "suggestions")
         if self.active_playlist_id is not None:
             return "playlist"
-        return "results" if self.tab == 0 else "queue"
+        return "results" if self.tab == 0 else "queue" if self.tab == 1 else "suggestions"
 
     def selected_indices_for(self, focus_name: str = "main") -> set[int]:
         context = self.selection_context(focus_name)
         if not self.visual_mode or not self.visual_anchor or self.visual_anchor[0] != context:
             if context == "playlist":
                 return {self.playlist_track_index}
-            return {self.result_index if context == "results" else self.queue_index}
+            return {self.result_index if context in ("results", "suggestions") else self.queue_index}
         start = self.visual_anchor[1]
-        end = self.playlist_track_index if context == "playlist" else self.result_index if context == "results" else self.queue_index
+        end = self.playlist_track_index if context == "playlist" else self.result_index if context in ("results", "suggestions") else self.queue_index
         return set(range(min(start, end), max(start, end) + 1))
 
     def clear_visual(self) -> None:
@@ -1356,8 +1655,11 @@ class PlaylistTUI:
             self.draw_help(8, width, list_height)
         elif self.tab == 0:
             self.draw_track_list(self.results, self.result_index, 8, list_height, 0, width)
-        else:
+        elif self.tab == 1:
             self.draw_track_list(self.player.queue, self.queue_index, 8, list_height, 0, width)
+        else:
+            self.suggestions = self.history_store.recommendations() if hasattr(self, "history_store") else getattr(self, "suggestions", [])
+            self.draw_track_list(self.suggestions, self.result_index, 8, list_height, 0, width)
         self.screen.hline(height - 2, 0, curses.ACS_HLINE, width)
         self.screen.addnstr(height - 1, 2, self.clipped(self.player.message, width - 4), max(1, width - 4), curses.A_DIM)
 
@@ -1365,11 +1667,13 @@ class PlaylistTUI:
         lines = [
             "MAIN WINDOW",
             "j/k move · g/G top/bottom · Ctrl-b/f half-page",
+            "[/] previous/next search result · Enter play",
             "v select · Enter play · Space pause anywhere",
-            "H/L seek · Ctrl-o loop · Tab Results/Queue · / search",
-            "a append · d bulk-delete queue · c clear · u undo · Ctrl-r redo",
+            "H/L seek · Ctrl-o loop · Tab Results/Queue/Suggestions · / search",
+            "a append · d download · D delete queue · c clear · u undo · Ctrl-r redo",
             "f find Queue song · n/N next/previous match · s shuffle Queue",
-            "Ctrl-d download · P toggle playlists · Ctrl-h/l or Ctrl-arrows focus",
+            "Ctrl-d current download · x/y/z cut/copy/paste playlists",
+            "P toggle playlists · Ctrl-h/l or Ctrl-arrows focus",
             "q quit",
             "",
             "PLAYLISTS WINDOW",
@@ -1432,9 +1736,22 @@ class PlaylistTUI:
         if self.tab == 0:
             if self.results:
                 self.result_index = (self.result_index + delta) % len(self.results)
-        else:
+        elif self.tab == 1:
             if self.player.queue:
                 self.queue_index = (self.queue_index + delta) % len(self.player.queue)
+        elif getattr(self, "suggestions", []):
+            self.result_index = (self.result_index + delta) % len(self.suggestions)
+
+    def move_search_result(self, delta: int) -> None:
+        """Move only within the current search result list."""
+        if self.tab != 0:
+            self.player.message = "Switch to the Results tab first"
+            return
+        if not self.results:
+            self.player.message = "No search results"
+            return
+        self.result_index = (self.result_index + delta) % len(self.results)
+        self.player.message = f"Search result {self.result_index + 1}/{len(self.results)}"
 
     def half_page(self) -> int:
         height, _ = self.screen.getmaxyx()
@@ -1443,8 +1760,10 @@ class PlaylistTUI:
     def move_to_edge_main(self, bottom: bool = False) -> None:
         if self.tab == 0:
             self.result_index = max(0, len(self.results) - 1) if bottom else 0
-        else:
+        elif self.tab == 1:
             self.queue_index = max(0, len(self.player.queue) - 1) if bottom else 0
+        else:
+            self.result_index = max(0, len(getattr(self, "suggestions", [])) - 1) if bottom else 0
 
     def move_to_edge_playlists(self, bottom: bool = False) -> None:
         if self.active_playlist_id is None:
@@ -1662,6 +1981,41 @@ class PlaylistTUI:
         self.clear_visual()
         self.player.message = f"Permanently removed {count} song(s)"
 
+    def copy_playlist_tracks(self, cut: bool = False) -> None:
+        """Copy or cut the current visual/ highlighted playlist selection."""
+        selected = self.selected_playlist_tracks()
+        if not selected:
+            self.player.message = "Open a playlist and select a song first"
+            return
+        playlist = selected[0][0]
+        self.clipboard_tracks = [track for _, _, track in selected]
+        self.clipboard_mode = "cut" if cut else "copy"
+        self.clipboard_source_id = playlist.id
+        if cut:
+            for _, index, _ in sorted(selected, key=lambda item: item[1], reverse=True):
+                self.store.remove_track(playlist, index)
+            self.playlist_track_index = max(0, min(self.playlist_track_index, len(playlist.tracks) - 1))
+            self.clear_visual()
+            self.player.message = f"Cut {len(self.clipboard_tracks)} song(s); open another playlist and press z to paste"
+        else:
+            self.player.message = f"Copied {len(self.clipboard_tracks)} song(s); open another playlist and press z to paste"
+
+    def paste_playlist_tracks(self) -> None:
+        playlist = self.current_playlist()
+        tracks = getattr(self, "clipboard_tracks", [])
+        if playlist is None:
+            self.player.message = "Open a destination playlist first"
+            return
+        if not tracks:
+            self.player.message = "Clipboard is empty"
+            return
+        added = sum(self.store.add_track(playlist, track) for track in tracks)
+        self.player.message = f"Pasted {added} song(s) into {playlist.name}"
+        if self.clipboard_mode == "cut":
+            self.clipboard_tracks = []
+            self.clipboard_mode = ""
+            self.clipboard_source_id = None
+
     def download_track(self, track: Track) -> None:
         downloads = self.store.get(0)
         if downloads is None:
@@ -1714,6 +2068,19 @@ class PlaylistTUI:
             return
         self.player.set_playlist_loop(playlist.tracks, not self.player.playlist_loop)
 
+    def delete_queue_selected(self) -> None:
+        selected = sorted(self.selected_indices_for("main"))
+        if not selected:
+            return
+        count = len(selected)
+        prompt = f"Delete {count} selected queue song(s)?"
+        if not self.prompt_confirm(prompt):
+            self.player.message = "Deletion cancelled"
+            return
+        self.player.remove_queue_indices(selected)
+        self.queue_index = max(0, min(self.queue_index, len(self.player.queue) - 1))
+        self.clear_visual()
+
     def handle_main(self, key: int) -> None:
         if key == ord("q"):
             self.running = False
@@ -1737,6 +2104,8 @@ class PlaylistTUI:
                 if track:
                     self.queue_index = max(0, min(self.queue_index, len(self.player.queue) - 1))
                     self.player.start(track, build_mix=False)
+            elif self.tab == 2 and getattr(self, "suggestions", []):
+                self.player.start(self.suggestions[self.result_index])
         elif key == ord(" "):
             self.player.mpv.toggle_pause()
         elif key == ord("h"):
@@ -1750,7 +2119,7 @@ class PlaylistTUI:
         elif key == 15:
             self.player.toggle_loop()
         elif key == 9:
-            self.tab = 1 - self.tab
+            self.tab = (self.tab + 1) % 3
             self.clear_visual()
         elif key == ord("/"):
             self.prompt_search()
@@ -1759,13 +2128,20 @@ class PlaylistTUI:
             added = sum(self.player.enqueue(track) for track in tracks)
             self.clear_visual()
             self.player.message = f"Added {added} song(s) to Queue"
-        elif key == ord("d") and self.tab == 1:
-            self.player.remove_queue_indices(sorted(self.selected_indices_for("main")))
-            self.queue_index = max(0, min(self.queue_index, len(self.player.queue) - 1))
-            self.clear_visual()
+        elif key == ord("d"):
+            track = self.focused_main_track()
+            if track:
+                self.download_track(track)
+            else:
+                self.player.message = "No highlighted song to download"
+        elif key == ord("D") and self.tab == 1:
+            self.delete_queue_selected()
         elif key == ord("c"):
-            self.player.clear_queue()
-            self.queue_index = 0
+            if self.player.queue and self.prompt_confirm("Clear the entire queue?"):
+                self.player.clear_queue()
+                self.queue_index = 0
+            elif self.player.queue:
+                self.player.message = "Deletion cancelled"
         elif key == ord("u"):
             self.player.undo_queue_action()
         elif key == 18:
@@ -1773,7 +2149,7 @@ class PlaylistTUI:
         elif key == ord("p"):
             self.prompt_playlist_number()
         elif key == ord("v"):
-            self.toggle_visual("results" if self.tab == 0 else "queue")
+            self.toggle_visual("results" if self.tab == 0 else "queue" if self.tab == 1 else "suggestions")
         elif key == 4:
             self.download_current()
 
@@ -1809,6 +2185,12 @@ class PlaylistTUI:
                 self.enqueue_playlist_track()
         elif key == ord("v") and self.active_playlist_id is not None:
             self.toggle_visual("playlist")
+        elif key == ord("x") and self.active_playlist_id is not None:
+            self.copy_playlist_tracks(cut=True)
+        elif key == ord("y") and self.active_playlist_id is not None:
+            self.copy_playlist_tracks(cut=False)
+        elif key == ord("z") and self.active_playlist_id is not None:
+            self.paste_playlist_tracks()
         elif key == ord("o") and self.active_playlist_id is not None:
             self.toggle_playlist_loop()
         elif key == ord("r"):
@@ -1823,8 +2205,13 @@ class PlaylistTUI:
                 self.delete_playlist_track()
             else:
                 self.delete_playlist()
-        elif key == 4 and self.active_playlist_id is not None:
+        elif key == ord("d") and self.active_playlist_id is not None:
             self.download_playlist_track()
+        elif key == 4:
+            if getattr(self.player, "current", None) is not None:
+                self.download_current()
+            else:
+                self.download_playlist_track()
         elif key == ord("?"):
             self.showing_help = True
 
@@ -1861,6 +2248,12 @@ class PlaylistTUI:
                     self._last_escape_at = now
                     self.player.message = "Press Esc again to clear Queue find"
             return
+        if key == ord("["):
+            self.move_search_result(-1)
+            return
+        if key == ord("]"):
+            self.move_search_result(1)
+            return
         if key == ord(" "):
             self.player.mpv.toggle_pause()
             return
@@ -1877,7 +2270,7 @@ class PlaylistTUI:
             self.prompt_search()
             return
         if key == 9:
-            self.tab = 1 - self.tab
+            self.tab = (self.tab + 1) % 3
             self.clear_visual()
             return
         if key == ord("s") and self.tab == 1:
@@ -1915,7 +2308,37 @@ class PlaylistTUI:
         else:
             self.handle_main(key)
 
+    def show_update_notice_if_needed(self) -> None:
+        state = NoticeState()
+        if state.last_seen_version() == __version__:
+            return
+        height, width = self.screen.getmaxyx()
+        box_height = min(height - 2, len(UPDATE_NOTICE_LINES) + 4)
+        box_width = min(width - 4, max(46, max(len(line) for line in UPDATE_NOTICE_LINES) + 6))
+        if box_height < 4 or box_width < 10:
+            state.mark_seen()
+            return
+        top = max(0, (height - box_height) // 2)
+        left = max(0, (width - box_width) // 2)
+        try:
+            modal = curses.newwin(box_height, box_width, top, left)
+            modal.keypad(True)
+            modal.nodelay(False)
+            modal.box()
+            for index, line in enumerate(UPDATE_NOTICE_LINES):
+                if index + 2 >= box_height - 1:
+                    break
+                attr = curses.A_BOLD if index == 0 else curses.A_NORMAL
+                modal.addnstr(index + 1, 2, self.clipped(line, box_width - 4), box_width - 4, attr)
+            modal.refresh()
+            while modal.getch() != 27:
+                pass
+        except curses.error:
+            pass
+        state.mark_seen()
+
     def run(self) -> None:
+        self.show_update_notice_if_needed()
         while self.running:
             self.draw()
             key = self.screen.getch()
