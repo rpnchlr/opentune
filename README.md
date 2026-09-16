@@ -6,14 +6,12 @@ It is deliberately small: OpenTune streams audio, with optional local downloads,
 and does not require a browser, YouTube account, or separate media library.
 Playback happens in a full-screen terminal UI (TUI).
 
-## v0.9.1
+## v1.0.0
 
-This release adds persistent listening-history recommendations, a Suggestions
-home tab, continuously replenished queues, live search suggestions with cursor
-editing, playlist cut/copy/paste, clearer download/delete keybinds, and a
-one-time post-update support notice. It also adds a dedicated History tab,
-backward tab navigation, faster history-first search suggestions, and stricter
-song-title matching.
+This release makes Suggestions the home tab, adds circular live suggestions,
+word-wise search editing, session-only listening history, compact in-memory
+preference signals, direct Alt-1..4 tab switching, visible SEARCHING/LOADING
+states, a floating help window, and a version indicator.
 
 ## What it can do
 
@@ -22,13 +20,13 @@ song-title matching.
 - Play, pause, go to the next/previous track, seek, and loop a track
 - Use Vim-like navigation (`h`, `j`, `k`, `l`) as well as arrow keys
 - Create a continuously replenished related mix after you choose a song
-- Show the upcoming mix in Queue and history-based recommendations in Suggestions
+- Show the upcoming mix in Queue and fresh, history-informed recommendations in Suggestions
 - Create persistent playlists in a right-side terminal pane
 - Download tracks to a pinned local Downloads playlist
 - Search and edit playlist contents without affecting the playback queue
 - Mark contiguous songs with visual mode (`v`) for bulk queue/playlist actions
 - Prefer downloaded local files automatically when a matching song is played
-- Save listening history and use it to populate the Suggestions tab
+- Keep listening history for the current session only and use compact preference signals for Suggestions
 - Cut, copy, and paste songs between playlists
 - Show live music suggestions while editing a search query
 - Loop an entire open playlist with `o`
@@ -186,7 +184,7 @@ pipx install opentune
 pipx upgrade opentune
 ```
 
-OpenTune v0.9.1 includes an installer hook for the short thank-you/support
+OpenTune v1.0.0 includes an installer hook for the short thank-you/support
 message (direct legacy installs and verbose pip builds show it; standard pip may
 hide build-hook output). On the first launch after a new release, the same
 message appears in a floating modal;
@@ -231,11 +229,11 @@ opentune --help
 ## First run
 
 1. Run `opentune <song or artist>`.
-2. A list of YouTube matches appears in the **Results** tab.
+2. The **Suggestions** tab is the home tab; a search automatically focuses **Results**.
 3. Move with `j`/`k` or `↓`/`↑`.
 4. Press `Enter` to start the highlighted result.
 5. The title and time appear at the top of the screen.
-6. OpenTune prepares and continuously replenishes a YouTube radio-style mix in the background. Press `Tab` to view **Queue**, **Suggestions**, and **History**, or `Shift+Tab` to move backward.
+6. OpenTune prepares and continuously replenishes a YouTube radio-style mix in the background. Press `Tab` to cycle **Suggestions**, **Results**, **Queue**, and **History**, or `Shift+Tab` to move backward.
 7. Press `q` to quit. `Esc` cancels prompts/visual mode; press it twice quickly
    in Queue or an open playlist to clear its find query.
 
@@ -255,8 +253,9 @@ opentune --help
 | `H` (`Shift+h`) | Rewind 10 seconds |
 | `L` (`Shift+l`) | Forward 10 seconds |
 | `Ctrl-o` | Toggle looping of the current track from any window |
-| `Tab` | Move forward through **Results**, **Queue**, **Suggestions**, and **History** |
+| `Tab` | Move forward through **Suggestions**, **Results**, **Queue**, and **History** |
 | `Shift+Tab` | Move backward through the home tabs |
+| `Alt+1` … `Alt+4` | Jump to Suggestions, Results, Queue, or History |
 | `/` | Open a search prompt from any window |
 | `f` (Queue tab) | Find and highlight a song in the Queue without filtering it |
 | `n` / `N` (Queue tab) | Jump to the next / previous match; status shows `[current/total]` |
@@ -275,11 +274,13 @@ opentune --help
 | `x` / `y` / `z` | Cut / copy / paste selected songs in an open playlist |
 | `P` | Toggle the Playlists pane |
 | `Ctrl-h` / `Ctrl-l` or `Ctrl-Left/Right` | Cycle focus between panes (wraps) |
+| `Ctrl-Left/Right` in search | Move the cursor by one word |
+| `Ctrl-Backspace` in search | Delete the previous word |
 | `?` | Open/close the in-player key reference |
 | `Esc` in a prompt or visual mode | Cancel the prompt or visual selection |
 | `Esc` twice in Queue | Clear the active Queue find query |
 | `Esc` twice in an open playlist | Clear the active playlist find query |
-| `Esc` in help | Close the help overlay or the v0.9.1 update notice |
+| `Esc` in help | Close the floating help overlay or update notice |
 | `q` | Quit OpenTune (the only quit key) |
 
 ## Results, playback, and the queue
@@ -307,17 +308,18 @@ continues playback automatically. Quitting with `q` stops replenishment.
 
 ### Suggestions tab
 
-The Suggestions tab becomes available immediately after the first recorded
-song. It starts with recent history-based seeds, then asks YouTube for a
-related music mix based on the most recent song and appends those tracks in the
-background. If it is empty, play at least one song and wait briefly for the
-related mix to load.
+The Suggestions tab is the home tab. It never displays the listening-history
+rows themselves. After songs are played, OpenTune keeps only a small in-memory
+preference signal (recent artists and title tokens), asks YouTube for related
+music from several recent seeds, and excludes anything already in History.
+Nothing in this signal is written to disk, so it uses no persistent history
+storage and disappears when OpenTune closes.
 
 ### History tab
 
-The History tab shows saved listening history directly, newest first. Starting
-a song records it immediately in `~/Music/opentune/history.json`, and the list
-remains available after restarting OpenTune.
+The History tab shows this session's listening history, newest first. It is
+kept in memory only and is cleared when OpenTune closes. Saved playlists remain
+available across restarts and are separate from listening history.
 
 Undo and redo are intentionally limited to queue deletion and queue clearing.
 Playback, search, pause, seeking, looping, and adding tracks are not recorded
