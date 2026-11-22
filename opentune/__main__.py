@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import curses
+import hashlib
 import json
 import os
 import random
@@ -18,13 +19,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from . import __version__
 
 
 SEARCH_LIMIT = 12
 MIX_LIMIT = 10
-SUGGESTION_DEBOUNCE = 0.08
+SUGGESTION_DEBOUNCE = 0.05
+SUGGESTION_CACHE_LIMIT = 64
+RELEASE_API_URL = "https://api.github.com/repos/rpnchlr/opentune/releases/latest"
+RELEASE_CHECK_TIMEOUT = 3.0
 TAB_SUGGESTIONS = 0
 TAB_RESULTS = 1
 TAB_QUEUE = 2
@@ -37,11 +43,44 @@ INSTALL_MESSAGE = (
 )
 UPDATE_NOTICE_LINES = (
     "Thank you for using OpenTune!",
-    "OpenTune v1.0.0 is now installed.",
+    "OpenTune v1.1.0 is now installed.",
     "Consider supporting the creator by starring or sponsoring:",
     PROJECT_URL,
     "",
     "Press Esc to close this message.",
+)
+STATE_IDLE = "IDLE"
+STATE_SEARCHING = "SEARCHING"
+STATE_LOADING = "LOADING"
+STATE_PLAYING = "PLAYING"
+STATE_PAUSED = "PAUSED"
+STATE_BUFFERING = "BUFFERING"
+STATE_STOPPED = "STOPPED"
+STATE_NETWORK_ERROR = "NETWORK ERROR"
+STATE_PLAYBACK_ERROR = "PLAYBACK ERROR"
+STATE_SEARCH_ERROR = "SEARCH ERROR"
+STATE_NO_RESULTS = "NO RESULTS"
+STATE_OFFLINE = "OFFLINE"
+
+WORD_LEFT_KEY = -10001
+WORD_RIGHT_KEY = -10002
+CTRL_BACKSPACE_KEY = -10003
+ALT_TAB_BASE = -10100
+
+ALTERNATIVE_VERSION_TERMS = {
+    "acoustic", "bass boosted", "cover", "flute", "instrumental", "karaoke",
+    "live", "lofi", "nightcore", "piano", "remix", "reverb", "sped up",
+    "slowed", "slowed + reverb", "study", "tribute", "8d", "metal cover",
+}
+OFFICIAL_VERSION_TERMS = {
+    "official", "official audio", "official video", "audio", "music video",
+    "lyrics", "lyric video",
+}
+NETWORK_TERMS = re.compile(
+    r"(?:network|timed? out|timeout|connection|connect|dns|unreachable|"
+    r"temporary failure|name or service not known|http error 5\d\d|"
+    r"unable to download|urlopen error|no internet|offline)",
+    re.IGNORECASE,
 )
 NON_MUSIC_TERMS = re.compile(
     r"\b(?:podcast|interview|reaction|review|news|tutorial|gameplay|walkthrough|"
@@ -62,6 +101,7 @@ Examples:
 
 Options:
   -h, --help     Show this help and exit.
+  --update       Check for and install the latest published release.
 
 Main window keys:
   j / Down       Select next result or queue track
@@ -78,6 +118,9 @@ Main window keys:
   Tab            Next tab: Suggestions, Results, Queue, History
   Shift-Tab      Previous tab
   Alt-1..Alt-4   Jump directly to Suggestions, Results, Queue, History
+  R              Refresh personalised Suggestions (Suggestions tab)
+  y              Add/remove the highlighted song from Liked Songs
+  D              Remove selected Suggestions (Suggestions tab)
   /              Search YouTube from any window
   Ctrl-Left/Right Move by words in the search bar
   Ctrl-Backspace Delete the previous word in the search bar
@@ -141,12 +184,12 @@ Playlist notes:
   Visual selections support bulk queue/playlist operations. Undo/redo do not
   apply to playlist song changes.
 
-OpenTune requires mpv and yt-dlp. It streams audio and optionally downloads
+OpenTune v1.1.0 requires mpv and yt-dlp. It streams audio and optionally downloads
 tracks with d/Ctrl-d. Selecting a result creates a continuously replenished
 YouTube radio-style mix, shown in the Queue tab. Suggestions use a compact,
-in-memory preference signal from this session and never persist listening
-history. Only music-like results are kept; use `a` to append a search result
-without starting it."""
+persisted preference signal and the Liked Songs playlist. Only music-like
+results are kept; use `a` to append a search result without starting it.
+Run `opentune --update` to check for and install the latest release."""
 
 
 @dataclass(frozen=True)
@@ -156,6 +199,8 @@ class Track:
     duration: int = 0
     uploader: str = ""
     local_path: str = ""
+    genre: str = ""
+    channel_id: str = ""
 
     @property
     def label(self) -> str:
@@ -171,6 +216,89 @@ def format_time(seconds: float | int | None) -> str:
     minutes, seconds = divmod(total, 60)
     hours, minutes = divmod(minutes, 60)
     return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
+
+
+class OpenTuneError(RuntimeError):
+    """Base class for user-facing OpenTune operation failures."""
+
+
+class NetworkError(OpenTuneError):
+    """An operation could not reach its remote service."""
+
+
+class SearchError(OpenTuneError):
+    """A search completed unsuccessfully for a non-network reason."""
+
+
+def looks_like_network_error(detail: object) -> bool:
+    return bool(NETWORK_TERMS.search(str(detail or "")))
+
+
+def version_tuple(value: str) -> tuple[int, ...]:
+    """Parse release versions without requiring packaging at runtime."""
+    numbers = re.findall(r"\d+", str(value or ""))
+    return tuple(int(number) for number in numbers[:4]) or (0,)
+
+
+def _safe_addnstr(window: curses.window, y: int, x: int, value: object, width: int, attr: int = 0) -> None:
+    """Draw bounded text without letting terminal edge cases abort the TUI.
+
+    ``addnwstr() returned ERR`` is commonly caused by writing a wide character
+    into the last terminal cell or by a resize between measuring and drawing.
+    Clamp against the current window size and retry with ASCII on terminals
+    that reject a Unicode glyph. This is a rendering safety boundary, not a
+    terminal-specific workaround.
+    """
+    try:
+        height, columns = window.getmaxyx()
+        if y < 0 or y >= height or x < 0 or x >= columns:
+            return
+        edge_limit = columns - x
+        # Leave the terminal's last cell untouched; curses may treat writing
+        # exactly into that cell as an ERR even when the text fits.
+        if edge_limit > 1:
+            edge_limit -= 1
+        available = min(max(0, int(width)), edge_limit)
+        if available <= 0:
+            return
+        text = str(value).replace("\n", " ").replace("\r", " ")
+        try:
+            window.addnstr(y, x, text, available, attr)
+        except (curses.error, UnicodeError):
+            fallback = text.encode("ascii", "replace").decode("ascii")
+            try:
+                window.addnstr(y, x, fallback, available, attr)
+            except (curses.error, UnicodeError):
+                return
+    except (AttributeError, curses.error, TypeError, UnicodeError, ValueError):
+        return
+
+
+def _safe_hline(window: curses.window, y: int, x: int, char: int, width: int) -> None:
+    try:
+        height, columns = window.getmaxyx()
+        if 0 <= y < height and 0 <= x < columns:
+            edge_limit = max(1, columns - x - 1)
+            window.hline(y, x, char, min(max(0, width), edge_limit))
+    except (AttributeError, curses.error, TypeError, ValueError):
+        return
+
+
+def _safe_vline(window: curses.window, y: int, x: int, char: int, height: int) -> None:
+    try:
+        rows, columns = window.getmaxyx()
+        if 0 <= y < rows and 0 <= x < columns:
+            edge_limit = max(1, rows - y - 1)
+            window.vline(y, x, char, min(max(0, height), edge_limit))
+    except (AttributeError, curses.error, TypeError, ValueError):
+        return
+
+
+def _safe_curs_set(value: int) -> None:
+    try:
+        curses.curs_set(value)
+    except curses.error:
+        return
 
 
 def fuzzy_score(query: str, candidate: str) -> int | None:
@@ -217,7 +345,46 @@ def is_backtab(key: int) -> bool:
 
 def is_ctrl_backspace(key: int) -> bool:
     """Recognize terminals that expose Ctrl-Backspace separately."""
-    return key in {getattr(curses, "KEY_CBACKSPACE", -999), 23}
+    return key in {CTRL_BACKSPACE_KEY, getattr(curses, "KEY_CBACKSPACE", -999), 23}
+
+
+def is_word_left_key(key: int) -> bool:
+    return key in {WORD_LEFT_KEY, getattr(curses, "KEY_CLEFT", -999), 545, 546}
+
+
+def is_word_right_key(key: int) -> bool:
+    return key in {WORD_RIGHT_KEY, getattr(curses, "KEY_CRIGHT", -999), 561, 562}
+
+
+def read_prompt_key(screen: curses.window) -> int:
+    """Normalize common raw xterm word-navigation escape sequences.
+
+    Some curses builds expose Ctrl-left/right as KEY_CLEFT/KEY_CRIGHT, while
+    others return the underlying ``CSI ... ; 5 D/C`` sequence one byte at a
+    time. Supporting both keeps search editing consistent in Linux terminals,
+    Ghostty and Termux without changing the global pane shortcuts.
+    """
+    key = screen.getch()
+    if key != 27:
+        return key
+    sequence: list[int] = []
+    for _ in range(8):
+        part = screen.getch()
+        if part < 0:
+            break
+        sequence.append(part)
+        if part in (ord("C"), ord("D"), ord("~"), ord("c"), ord("d")):
+            break
+    raw = bytes(sequence)
+    if raw.endswith((b"D", b"d")) and (b"5" in raw or b"b" in raw):
+        return WORD_LEFT_KEY
+    if raw.endswith((b"C", b"c")) and (b"5" in raw or b"f" in raw):
+        return WORD_RIGHT_KEY
+    if raw.endswith(b"3;5~"):
+        return CTRL_BACKSPACE_KEY
+    if len(raw) == 1 and ord("1") <= raw[0] <= ord("4"):
+        return ALT_TAB_BASE + (raw[0] - ord("0"))
+    return 27
 
 
 def move_word_left(chars: list[str], cursor: int) -> int:
@@ -245,6 +412,51 @@ def delete_word_left(chars: list[str], cursor: int) -> int:
 class YouTube:
     """Small, deliberately dependency-free yt-dlp adapter."""
 
+    _suggestion_cache: dict[tuple[str, int], tuple[float, list[Track]]] = {}
+    _suggestion_cache_lock = threading.Lock()
+    _suggestion_cache_ttl = 30.0
+
+    @staticmethod
+    def _query_intent(query: str) -> set[str]:
+        lowered = query.lower()
+        return {term for term in ALTERNATIVE_VERSION_TERMS if term in lowered}
+
+    @classmethod
+    def _search_score(cls, query: str, track: Track, index: int = 0) -> int:
+        """Rank likely official versions while preserving explicit intent.
+
+        YouTube already supplies a useful relevance ordering. This layer adds
+        small, explainable metadata signals instead of filtering alternatives
+        out: an explicitly requested remix or karaoke version remains eligible,
+        while an unrequested alternative is ranked below the official audio.
+        """
+        intent = cls._query_intent(query)
+        base_query = query
+        for term in intent:
+            base_query = re.sub(re.escape(term), " ", base_query, flags=re.IGNORECASE)
+        score = song_match_score(base_query.strip() or query, track) or -300
+        title = track.title.lower()
+        uploader = track.uploader.lower()
+        combined = f"{title} {uploader}"
+        if intent:
+            for term in intent:
+                score += 260 if term in combined else -70
+        else:
+            score -= sum(135 for term in ALTERNATIVE_VERSION_TERMS if term in title)
+            score += sum(35 for term in OFFICIAL_VERSION_TERMS if term in title)
+            if uploader and any(token in uploader for token in ("official", "records", "music", "vevo")):
+                score += 45
+        return score - index
+
+    @classmethod
+    def rank_search_results(cls, query: str, candidates: list[Track]) -> list[Track]:
+        ranked = [
+            (cls._search_score(query, track, index), index, track)
+            for index, track in enumerate(candidates)
+        ]
+        ranked.sort(key=lambda item: (-item[0], item[1]))
+        return [track for _, _, track in ranked]
+
     @staticmethod
     def _looks_like_music(entry: dict[str, Any]) -> bool:
         title = str(entry.get("title") or "")
@@ -268,8 +480,20 @@ class YouTube:
         try:
             completed = subprocess.run(command, capture_output=True, text=True, timeout=25, check=True)
             payload = json.loads(completed.stdout)
-        except (subprocess.SubprocessError, json.JSONDecodeError) as error:
-            raise RuntimeError(f"{label} failed: {error}") from error
+        except json.JSONDecodeError as error:
+            raise SearchError(f"{label} returned invalid metadata") from error
+        except subprocess.TimeoutExpired as error:
+            raise NetworkError(f"{label} timed out; check your internet connection") from error
+        except subprocess.CalledProcessError as error:
+            detail = (error.stderr or error.stdout or str(error)).strip()
+            message = f"{label} failed: {detail}"
+            if looks_like_network_error(detail):
+                raise NetworkError(f"{label} failed because the network is unavailable") from error
+            raise SearchError(message) from error
+        except (subprocess.SubprocessError, OSError) as error:
+            if looks_like_network_error(error):
+                raise NetworkError(f"{label} failed because the network is unavailable") from error
+            raise SearchError(f"{label} failed: {error}") from error
         tracks: list[Track] = []
         for entry in payload.get("entries") or []:
             video_id = entry.get("id")
@@ -280,6 +504,8 @@ class YouTube:
                 url=entry.get("webpage_url") or f"https://www.youtube.com/watch?v={video_id}",
                 duration=int(entry.get("duration") or 0),
                 uploader=entry.get("uploader") or entry.get("channel") or "",
+                genre=str(entry.get("genre") or ""),
+                channel_id=str(entry.get("channel_id") or ""),
             ))
         return tracks
 
@@ -287,19 +513,37 @@ class YouTube:
     def search(cls, query: str, limit: int = SEARCH_LIMIT) -> list[Track]:
         if not query.strip():
             return []
-        return cls._fetch(f"ytsearch{limit}:{query} music", "Search")
+        candidates = cls._fetch(f"ytsearch{limit}:{query}", "Search")
+        return cls.rank_search_results(query, candidates)[:limit]
 
     @classmethod
     def suggestions(cls, query: str, limit: int = 5) -> list[Track]:
         """Return only music results whose title or artist matches the query."""
+        cache_key = (query.strip().casefold(), limit)
+        now = time.monotonic()
+        with cls._suggestion_cache_lock:
+            cached = cls._suggestion_cache.get(cache_key)
+            if cached and now - cached[0] < cls._suggestion_cache_ttl:
+                return list(cached[1])
         candidates = cls.search(query, max(limit * 2, 8))
         ranked = [
-            (score, index, track)
+            (cls._search_score(query, track, index), index, track)
             for index, track in enumerate(candidates)
-            if (score := song_match_score(query, track)) is not None
+            if song_match_score(query, track) is not None
         ]
         ranked.sort(key=lambda item: (-item[0], item[1]))
-        return [track for _, _, track in ranked[:limit]]
+        result = [track for _, _, track in ranked[:limit]]
+        with cls._suggestion_cache_lock:
+            if len(cls._suggestion_cache) >= SUGGESTION_CACHE_LIMIT:
+                oldest = min(cls._suggestion_cache, key=lambda key: cls._suggestion_cache[key][0])
+                cls._suggestion_cache.pop(oldest, None)
+            cls._suggestion_cache[cache_key] = (now, list(result))
+        return result
+
+    @classmethod
+    def clear_suggestion_cache(cls) -> None:
+        with cls._suggestion_cache_lock:
+            cls._suggestion_cache.clear()
 
     @staticmethod
     def _video_id(url: str) -> str | None:
@@ -324,6 +568,26 @@ class YouTube:
         return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", title)).strip()
 
     @classmethod
+    def _related_score(cls, seed: Track, candidate: Track) -> int:
+        """Score metadata evidence that a candidate belongs in the same mix."""
+        score = 0
+        if seed.genre and candidate.genre:
+            score += 90 if seed.genre.casefold() == candidate.genre.casefold() else -90
+        if seed.channel_id and candidate.channel_id and seed.channel_id == candidate.channel_id:
+            score += 40
+        if seed.uploader and candidate.uploader:
+            if seed.uploader.casefold() == candidate.uploader.casefold():
+                score += 100
+            elif seed.uploader.casefold() in candidate.uploader.casefold():
+                score += 35
+        seed_tokens = set(re.findall(r"[a-z0-9]{3,}", seed.title.lower()))
+        candidate_tokens = set(re.findall(r"[a-z0-9]{3,}", candidate.title.lower()))
+        score += min(60, 20 * len(seed_tokens & candidate_tokens))
+        if any(term in candidate.title.lower() for term in ALTERNATIVE_VERSION_TERMS):
+            score -= 45
+        return score
+
+    @classmethod
     def _unique_mix(cls, seed: Track, candidates: list[Track]) -> list[Track]:
         seed_key = cls._track_key(seed)
         seen: set[str] = set()
@@ -332,6 +596,8 @@ class YouTube:
             key = cls._track_key(candidate)
             same_song = bool(seed_key and (key == seed_key or key.startswith(seed_key + " ") or seed_key.startswith(key + " ")))
             if not key or candidate.url == seed.url or same_song or key in seen:
+                continue
+            if cls._related_score(seed, candidate) < -40:
                 continue
             seen.add(key)
             mix.append(candidate)
@@ -363,6 +629,33 @@ class YouTube:
         candidates = cls.search(f"{artist} songs", MIX_LIMIT * 3)
         return cls._unique_mix(track, candidates)
 
+    @classmethod
+    def recommendations(
+        cls,
+        seeds: list[Track],
+        excluded: set[str] | None = None,
+        limit: int = SEARCH_LIMIT,
+    ) -> list[Track]:
+        """Build a bounded recommendation batch from liked/history seeds."""
+        excluded_urls = set(excluded or ()) | {track.url for track in seeds}
+        candidates: list[Track] = []
+        seen: set[str] = set(excluded_urls)
+        for seed in seeds[:5]:
+            try:
+                related = cls.mix_for(seed)
+            except OpenTuneError:
+                continue
+            for track in related:
+                if track.url in seen:
+                    continue
+                seen.add(track.url)
+                candidates.append(track)
+                if len(candidates) >= limit * 3:
+                    break
+            if len(candidates) >= limit * 3:
+                break
+        return candidates[:limit]
+
 
 class MPV:
     """Controls one headless mpv instance over its JSON IPC socket."""
@@ -372,17 +665,23 @@ class MPV:
         self._on_error = on_error
         self._directory = tempfile.TemporaryDirectory(prefix="opentune-")
         self._socket_number = 0
-        self.socket_path = str(Path(self._directory.name) / "mpv-0.sock")
+        self.socket_path = self._new_ipc_path()
         self.process: subprocess.Popen[str] | None = None
         self._intentional_stop = False
         self._lock = threading.Lock()
+
+    def _new_ipc_path(self) -> str:
+        if os.name == "nt":
+            # mpv exposes --input-ipc-server as a named pipe on Windows.
+            return rf"\\.\pipe\opentune-{os.getpid()}-{uuid.uuid4().hex}"
+        return str(Path(self._directory.name) / f"mpv-{self._socket_number}.sock")
 
     def play(self, track: Track, loop: bool = False) -> None:
         self.stop()
         self._intentional_stop = False
         self._socket_number += 1
-        socket_path = Path(self._directory.name) / f"mpv-{self._socket_number}.sock"
-        self.socket_path = str(socket_path)
+        socket_path = self._new_ipc_path()
+        self.socket_path = socket_path
         command = [
             "mpv", "--no-video", "--force-window=no", "--really-quiet",
             f"--input-ipc-server={self.socket_path}", "--ytdl-format=bestaudio/best", track.source,
@@ -398,7 +697,7 @@ class MPV:
         is_current = process is self.process
         if is_current:
             self.process = None
-        if socket_path:
+        if socket_path and os.name != "nt":
             try:
                 Path(socket_path).unlink(missing_ok=True)
             except OSError:
@@ -414,6 +713,8 @@ class MPV:
             return None
         message = json.dumps({"command": command}) + "\n"
         with self._lock:
+            if os.name == "nt":
+                return self._windows_command(message)
             try:
                 client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 client.settimeout(0.25)
@@ -422,8 +723,75 @@ class MPV:
                 response = client.recv(4096)
                 client.close()
                 return json.loads(response.decode().splitlines()[0]).get("data")
-            except (OSError, json.JSONDecodeError, IndexError):
+            except (AttributeError, OSError, json.JSONDecodeError, IndexError):
                 return None
+
+    def _windows_command(self, message: str) -> Any | None:
+        """Send one JSON IPC command through mpv's Windows named pipe."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.windll.kernel32
+            kernel32.WaitNamedPipeW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD]
+            kernel32.WaitNamedPipeW.restype = wintypes.BOOL
+            kernel32.CreateFileW.argtypes = [
+                wintypes.LPCWSTR,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                ctypes.c_void_p,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                wintypes.HANDLE,
+            ]
+            kernel32.CreateFileW.restype = wintypes.HANDLE
+            kernel32.WriteFile.argtypes = [
+                wintypes.HANDLE,
+                ctypes.c_void_p,
+                wintypes.DWORD,
+                ctypes.POINTER(wintypes.DWORD),
+                ctypes.c_void_p,
+            ]
+            kernel32.WriteFile.restype = wintypes.BOOL
+            kernel32.ReadFile.argtypes = [
+                wintypes.HANDLE,
+                ctypes.c_void_p,
+                wintypes.DWORD,
+                ctypes.POINTER(wintypes.DWORD),
+                ctypes.c_void_p,
+            ]
+            kernel32.ReadFile.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            if not kernel32.WaitNamedPipeW(self.socket_path, 250):
+                return None
+            handle = kernel32.CreateFileW(
+                self.socket_path,
+                0xC0000000,  # GENERIC_READ | GENERIC_WRITE
+                0,
+                None,
+                3,  # OPEN_EXISTING
+                0,
+                None,
+            )
+            if handle == wintypes.HANDLE(-1).value:
+                return None
+            try:
+                encoded = message.encode("utf-8")
+                encoded_buffer = ctypes.create_string_buffer(encoded)
+                written = wintypes.DWORD(0)
+                if not kernel32.WriteFile(handle, encoded_buffer, len(encoded), ctypes.byref(written), None):
+                    return None
+                buffer = ctypes.create_string_buffer(65536)
+                received = wintypes.DWORD(0)
+                if not kernel32.ReadFile(handle, buffer, len(buffer), ctypes.byref(received), None):
+                    return None
+                payload = buffer.raw[: received.value].decode("utf-8")
+                return json.loads(payload.splitlines()[0]).get("data")
+            finally:
+                kernel32.CloseHandle(handle)
+        except (AttributeError, OSError, UnicodeError, ValueError, json.JSONDecodeError, IndexError):
+            return None
 
     def toggle_pause(self) -> None:
         self.command(["cycle", "pause"])
@@ -448,10 +816,11 @@ class MPV:
             except subprocess.TimeoutExpired:
                 self.process.kill()
         self.process = None
-        try:
-            Path(self.socket_path).unlink(missing_ok=True)
-        except OSError:
-            pass
+        if os.name != "nt":
+            try:
+                Path(self.socket_path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def close(self) -> None:
         self.stop()
@@ -468,11 +837,12 @@ class QueueAction:
 
 
 class HistoryStore:
-    """Keep listening history in memory for one OpenTune session.
+    """Persist recent listening history and compact preference signals.
 
     ``persist=True`` remains available for callers of the old store API, but
-    the application uses the session-only mode. Preferences are represented by
-    small artist/title counters rather than a second on-disk history database.
+    the application uses the persistent mode for personalised suggestions.
+    Preferences are represented by small artist/title counters derived from the
+    history entries rather than a second on-disk history database.
     """
 
     def __init__(self, root: Path | None = None, *, persist: bool = True) -> None:
@@ -502,6 +872,8 @@ class HistoryStore:
             duration=int(data.get("duration") or 0),
             uploader=str(data.get("uploader") or ""),
             local_path=str(data.get("local_path") or ""),
+            genre=str(data.get("genre") or ""),
+            channel_id=str(data.get("channel_id") or ""),
         )
 
     @staticmethod
@@ -512,6 +884,8 @@ class HistoryStore:
             "duration": track.duration,
             "uploader": track.uploader,
             "local_path": track.local_path,
+            "genre": track.genre,
+            "channel_id": track.channel_id,
         }
 
     def _load(self) -> None:
@@ -522,6 +896,17 @@ class HistoryStore:
         except (OSError, json.JSONDecodeError):
             return
         self._entries = [item for item in raw if isinstance(item, dict) and item.get("url")] if isinstance(raw, list) else []
+        self._rebuild_preferences()
+
+    def _rebuild_preferences(self) -> None:
+        self._artist_preferences.clear()
+        self._title_preferences.clear()
+        for entry in self._entries:
+            artist = str(entry.get("uploader") or "").strip().lower()
+            if artist:
+                self._artist_preferences[artist] = self._artist_preferences.get(artist, 0) + 1
+            for token in re.findall(r"[a-z0-9]{3,}", str(entry.get("title") or "").lower()):
+                self._title_preferences[token] = self._title_preferences.get(token, 0) + 1
 
     def _save(self) -> None:
         if not self.persist:
@@ -536,6 +921,7 @@ class HistoryStore:
     def record(self, track: Track) -> None:
         self._entries = [item for item in self._entries if item.get("url") != track.url]
         self._entries.insert(0, {**self._track_to_json(track), "played_at": int(time.time())})
+        self._entries = self._entries[:200]
         artist = track.uploader.strip().lower()
         if artist:
             self._artist_preferences[artist] = self._artist_preferences.get(artist, 0) + 1
@@ -582,12 +968,158 @@ class HistoryStore:
         return artist_score * 2 + title_score
 
     def clear(self) -> None:
-        """Drop all session data; session-only stores never write a file."""
+        """Drop local history and preference signals."""
         self._entries.clear()
         self._artist_preferences.clear()
         self._title_preferences.clear()
+        self._save()
 
-    close = clear
+    def close(self) -> None:
+        """Flush persistent history without deleting it at application exit."""
+        if self.persist:
+            self._save()
+        else:
+            self.clear()
+
+
+class RecommendationStore:
+    """Persistent Liked Songs and Suggestions cache.
+
+    The cache is intentionally a small set of JSON files beside the existing
+    playlist data. It stores metadata needed to regenerate recommendations,
+    not audio. Dismissals are retained until the user explicitly refreshes
+    Suggestions.
+    """
+
+    SCHEMA_VERSION = 1
+
+    def __init__(self, root: Path | None = None) -> None:
+        self.root = Path(root) if root else Path.home() / "Music" / "opentune"
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.liked_cache_path = self.root / "liked-cache.json"
+        self.suggestions_path = self.root / "suggestions.json"
+        self.liked_signature = ""
+        self.cached_suggestions: list[Track] = []
+        self.dismissed: set[str] = set()
+        self.generated_at = 0
+        self._load()
+
+    @staticmethod
+    def _track_from_json(data: dict[str, Any]) -> Track:
+        return HistoryStore._track_from_json(data)
+
+    @staticmethod
+    def _track_to_json(track: Track) -> dict[str, Any]:
+        return HistoryStore._track_to_json(track)
+
+    @staticmethod
+    def signature(tracks: list[Track]) -> str:
+        payload = [
+            (track.url, track.title, track.uploader, track.duration, track.genre, track.channel_id)
+            for track in tracks
+        ]
+        return hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _unique_tracks(tracks: list[Track]) -> list[Track]:
+        result: list[Track] = []
+        seen: set[str] = set()
+        for track in tracks:
+            if not track.url or track.url in seen:
+                continue
+            seen.add(track.url)
+            result.append(track)
+        return result
+
+    def _atomic_write(self, path: Path, data: Any) -> None:
+        temporary = path.with_name(f".{path.name}.tmp")
+        try:
+            temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            temporary.replace(path)
+        except OSError:
+            temporary.unlink(missing_ok=True)
+
+    def _load(self) -> None:
+        try:
+            liked = json.loads(self.liked_cache_path.read_text(encoding="utf-8"))
+            self.liked_signature = str(liked.get("signature") or "") if isinstance(liked, dict) else ""
+        except (OSError, json.JSONDecodeError):
+            self.liked_signature = ""
+        try:
+            data = json.loads(self.suggestions_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(data, dict):
+            return
+        raw_tracks = data.get("suggestions") or []
+        self.cached_suggestions = self._unique_tracks([
+            self._track_from_json(item) for item in raw_tracks if isinstance(item, dict) and item.get("url")
+        ])
+        self.dismissed = {str(url) for url in data.get("dismissed", []) if url}
+        self.generated_at = int(data.get("generated_at") or 0)
+
+    def _save_suggestions(self) -> None:
+        self._atomic_write(self.suggestions_path, {
+            "schema_version": self.SCHEMA_VERSION,
+            "generated_at": self.generated_at,
+            "dismissed": sorted(self.dismissed),
+            "suggestions": [self._track_to_json(track) for track in self.cached_suggestions],
+        })
+
+    def sync_liked(self, liked_tracks: list[Track]) -> bool:
+        """Update the liked-song cache and prune invalid recommendations."""
+        tracks = self._unique_tracks(liked_tracks)
+        signature = self.signature(tracks)
+        changed = signature != self.liked_signature
+        if changed:
+            self.liked_signature = signature
+            artists = sorted({track.uploader for track in tracks if track.uploader})
+            tokens: dict[str, int] = {}
+            for track in tracks:
+                for token in re.findall(r"[a-z0-9]{3,}", track.title.lower()):
+                    tokens[token] = tokens.get(token, 0) + 1
+            self._atomic_write(self.liked_cache_path, {
+                "schema_version": self.SCHEMA_VERSION,
+                "updated_at": int(time.time()),
+                "signature": signature,
+                "tracks": [self._track_to_json(track) for track in tracks],
+                "artists": artists,
+                "title_tokens": tokens,
+            })
+            liked_urls = {track.url for track in tracks}
+            self.cached_suggestions = [
+                track for track in self.cached_suggestions if track.url not in liked_urls
+            ]
+            self._save_suggestions()
+        return changed
+
+    def suggestions(self, liked_tracks: list[Track] | None = None, limit: int = SEARCH_LIMIT) -> list[Track]:
+        liked_urls = {track.url for track in liked_tracks or []}
+        return [
+            track for track in self.cached_suggestions
+            if track.url not in liked_urls and track.url not in self.dismissed
+        ][:limit]
+
+    def save_suggestions(self, tracks: list[Track], *, reset_dismissed: bool = False) -> None:
+        if reset_dismissed:
+            self.dismissed.clear()
+        self.cached_suggestions = self._unique_tracks(tracks)
+        self.generated_at = int(time.time())
+        self._save_suggestions()
+
+    def dismiss(self, track_or_url: Track | str) -> None:
+        url = track_or_url.url if isinstance(track_or_url, Track) else str(track_or_url)
+        if not url:
+            return
+        self.dismissed.add(url)
+        self.cached_suggestions = [track for track in self.cached_suggestions if track.url != url]
+        self._save_suggestions()
+
+    def clear_dismissals(self) -> None:
+        self.dismissed.clear()
+        self._save_suggestions()
 
 
 class NoticeState:
@@ -614,6 +1146,118 @@ class NoticeState:
             pass
 
 
+@dataclass(frozen=True)
+class ReleaseInfo:
+    version: str
+    url: str = PROJECT_URL
+    name: str = ""
+
+
+class ReleaseChecker:
+    """Asynchronously check the official GitHub latest-release endpoint."""
+
+    def __init__(self, path: Path | None = None) -> None:
+        cache_root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "opentune"
+        self.path = Path(path) if path else cache_root / "update.json"
+        self._lock = threading.Lock()
+
+    def _load(self) -> dict[str, Any]:
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            return raw if isinstance(raw, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _save(self, data: dict[str, Any]) -> None:
+        temporary = self.path.with_name(f".{self.path.name}.tmp")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            temporary.replace(self.path)
+        except OSError:
+            temporary.unlink(missing_ok=True)
+
+    def cached(self) -> ReleaseInfo | None:
+        data = self._load()
+        version = str(data.get("latest_version") or "")
+        return ReleaseInfo(version, str(data.get("url") or PROJECT_URL), str(data.get("name") or "")) if version else None
+
+    def fetch_latest(self) -> ReleaseInfo:
+        request = Request(
+            RELEASE_API_URL,
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "OpenTune"},
+        )
+        try:
+            with urlopen(request, timeout=RELEASE_CHECK_TIMEOUT) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
+            raise NetworkError("Could not check GitHub for updates") from error
+        tag = str(payload.get("tag_name") or payload.get("name") or "").strip()
+        version = tag[1:] if tag.lower().startswith("v") else tag
+        if not version:
+            raise SearchError("GitHub did not return a release version")
+        info = ReleaseInfo(
+            version,
+            str(payload.get("html_url") or PROJECT_URL),
+            str(payload.get("name") or ""),
+        )
+        data = self._load()
+        data.update({
+            "latest_version": info.version,
+            "url": info.url,
+            "name": info.name,
+            "checked_at": int(time.time()),
+        })
+        self._save(data)
+        return info
+
+    def check_async(self, callback: Callable[[ReleaseInfo | None], None]) -> None:
+        def worker() -> None:
+            try:
+                info = self.fetch_latest()
+            except OpenTuneError:
+                info = None
+            callback(info)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def was_notified(self, version: str) -> bool:
+        return self._load().get("notified_version") == version
+
+    def mark_notified(self, version: str) -> None:
+        data = self._load()
+        data["notified_version"] = version
+        data["notified_at"] = int(time.time())
+        self._save(data)
+
+
+def update_installation(checker: ReleaseChecker | None = None) -> int:
+    """Upgrade a package-manager installation after an explicit CLI request."""
+    checker = checker or ReleaseChecker()
+    try:
+        latest = checker.fetch_latest()
+    except OpenTuneError as error:
+        print(f"opentune: update check failed: {error}", file=sys.stderr)
+        return 1
+    if version_tuple(latest.version) <= version_tuple(__version__):
+        print(f"OpenTune {__version__} is already up to date (latest: {latest.version}).")
+        return 0
+    executable_parts = {part.casefold() for part in Path(sys.executable).resolve().parts}
+    pipx_install = "pipx" in executable_parts and "venvs" in executable_parts
+    if pipx_install and shutil.which("pipx"):
+        command = ["pipx", "upgrade", "opentune"]
+    else:
+        command = [sys.executable, "-m", "pip", "install", "--upgrade", "opentune"]
+    print(f"Updating OpenTune {__version__} → {latest.version} using {' '.join(command)}...")
+    try:
+        subprocess.run(command, check=True)
+    except (OSError, subprocess.CalledProcessError) as error:
+        print(f"opentune: update failed: {error}", file=sys.stderr)
+        return 1
+    print(f"OpenTune was updated to {latest.version}. Your local data was preserved.")
+    return 0
+
+
 class Player:
     def __init__(self) -> None:
         self.current: Track | None = None
@@ -624,7 +1268,7 @@ class Player:
         self.playlist_tracks: list[Track] = []
         self.track_resolver: Callable[[Track], Track] | None = None
         self.message = "Ready. Press / to search."
-        self.status = "IDLE"
+        self.status = STATE_IDLE
         self.playback_failed = False
         self.history_store: HistoryStore | None = None
         self.continuous_queue = True
@@ -639,6 +1283,7 @@ class Player:
 
     def start(self, track: Track, *, build_mix: bool = True, remember_current: bool = True) -> None:
         track = self.resolve_track(track)
+        play_error: str | None = None
         with self._lock:
             if build_mix:
                 self.playlist_loop = False
@@ -647,11 +1292,17 @@ class Player:
                 self.history.append(self.current)
             self.current = track
             self.playback_failed = False
-            self.status = "LOADING"
+            self.status = STATE_LOADING
             if self.history_store:
                 self.history_store.record(track)
-            self.mpv.play(track, self.loop)
-            self.message = f"Playing: {track.title}"
+            try:
+                self.mpv.play(track, self.loop)
+                self.message = f"Loading: {track.title}"
+            except OSError as error:
+                play_error = str(error)
+        if play_error is not None:
+            self._playback_error(play_error)
+            return
         threading.Thread(target=self._mark_playing_when_ready, args=(track,), daemon=True).start()
         if build_mix:
             threading.Thread(target=self._build_mix, args=(track,), daemon=True).start()
@@ -664,7 +1315,7 @@ class Player:
                 if self.current != track or self.playback_failed:
                     return
                 if getattr(self.mpv, "process", None) is not None:
-                    self.status = "PLAYING"
+                    self.status = STATE_PLAYING
                     return
 
     def _build_mix(self, track: Track) -> None:
@@ -691,9 +1342,19 @@ class Player:
     def _playback_error(self, detail: str) -> None:
         with self._lock:
             self.playback_failed = True
-            self.status = "ERROR"
+            self.status = STATE_NETWORK_ERROR if looks_like_network_error(detail) else STATE_PLAYBACK_ERROR
             compact = " ".join(detail.split())
-            self.message = f"Playback failed: {compact[-220:]}"
+            prefix = "Network error" if self.status == STATE_NETWORK_ERROR else "Playback failed"
+            self.message = f"{prefix}: {compact[-220:]}"
+
+    def toggle_pause(self) -> None:
+        """Toggle mpv pause and keep the displayed state in sync."""
+        if not self.current:
+            self.message = "Nothing is currently playing"
+            return
+        self.mpv.toggle_pause()
+        _, paused = self.mpv.state()
+        self.status = STATE_PAUSED if paused else STATE_PLAYING
 
     def next(self) -> None:
         with self._lock:
@@ -826,6 +1487,7 @@ class Player:
         self.start(previous_track, build_mix=False, remember_current=False)
 
     def _finished(self) -> None:
+        self.status = STATE_STOPPED
         if self.loop:
             return
         if self.playlist_loop and not self.queue and self.playlist_tracks:
@@ -866,7 +1528,7 @@ class Player:
                 if should_continue:
                     self.next()
             except RuntimeError:
-                pass
+                self.message = "Network error while replenishing the Queue"
             finally:
                 with self._lock:
                     self._refill_pending = False
@@ -881,6 +1543,7 @@ class Player:
     def close(self) -> None:
         self.continuous_queue = False
         self.mpv.close()
+        self.status = STATE_STOPPED
         if self.history_store:
             self.history_store.close()
 
@@ -908,7 +1571,15 @@ class Playlist:
 
 
 class PlaylistStore:
-    """Persistent playlist storage under ~/Music/opentune."""
+    """Persistent playlist storage under ``~/Music/opentune``.
+
+    Downloads and Liked Songs are OpenTune-managed system playlists. The
+    legacy ``all()``/``get()`` view keeps its old user-playlist indexing for
+    compatibility; ``all_for_ui()``/``get_ui()`` expose the full list.
+    """
+
+    DOWNLOADS_ID = "downloads"
+    LIKED_ID = "liked"
 
     def __init__(self, root: Path | None = None) -> None:
         self.root = Path(root) if root else Path.home() / "Music" / "opentune" / "Playlists"
@@ -927,6 +1598,8 @@ class PlaylistStore:
             duration=int(data.get("duration") or 0),
             uploader=str(data.get("uploader") or ""),
             local_path=str(data.get("local_path") or ""),
+            genre=str(data.get("genre") or ""),
+            channel_id=str(data.get("channel_id") or ""),
         )
 
     @staticmethod
@@ -937,10 +1610,12 @@ class PlaylistStore:
             "duration": track.duration,
             "uploader": track.uploader,
             "local_path": track.local_path,
+            "genre": track.genre,
+            "channel_id": track.channel_id,
         }
 
     def _playlist_path(self, playlist_id: str) -> Path:
-        return self.root / ("downloads.json" if playlist_id == "downloads" else f"{playlist_id}.json")
+        return self.root / f"{playlist_id}.json"
 
     def _load(self) -> None:
         entries: list[dict[str, Any]] = []
@@ -952,18 +1627,23 @@ class PlaylistStore:
                 entries = []
         for entry in entries:
             playlist_id = str(entry.get("id") or "")
-            if not playlist_id or playlist_id == "downloads":
+            if not playlist_id or playlist_id in {self.DOWNLOADS_ID, self.LIKED_ID}:
                 continue
             self._playlists.append(self._load_playlist(
                 playlist_id,
                 str(entry.get("name") or "Untitled Playlist"),
                 bool(entry.get("pinned", False)),
             ))
-        downloads = self._load_playlist("downloads", "Downloads", True)
-        self._playlists.insert(0, downloads)
+        downloads = self._load_playlist(self.DOWNLOADS_ID, "Downloads", True)
+        liked = self._load_playlist(self.LIKED_ID, "Liked Songs", True)
+        self._playlists[0:0] = [downloads, liked]
         self._atomic_write(
-            self._playlist_path("downloads"),
+            self._playlist_path(self.DOWNLOADS_ID),
             [self._track_to_json(track) for track in downloads.tracks],
+        )
+        self._atomic_write(
+            self._playlist_path(self.LIKED_ID),
+            [self._track_to_json(track) for track in liked.tracks],
         )
         self._save_manifest()
 
@@ -975,7 +1655,7 @@ class PlaylistStore:
                 raw = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(raw, list):
                     tracks = [self._track_from_json(item) for item in raw if isinstance(item, dict)]
-                    if playlist_id == "downloads":
+                    if playlist_id == self.DOWNLOADS_ID:
                         # Downloads is rebuilt only from files that still exist;
                         # old metadata-only entries are intentionally discarded.
                         tracks = [
@@ -1006,14 +1686,29 @@ class PlaylistStore:
         self._save_manifest()
 
     def all(self) -> list[Playlist]:
+        return [item for item in self._playlists if item.id != self.LIKED_ID]
+
+    def all_for_ui(self) -> list[Playlist]:
+        """Return Downloads, Liked Songs, and user playlists for the TUI."""
         return list(self._playlists)
 
     def get(self, index: int) -> Playlist | None:
-        return self._playlists[index] if 0 <= index < len(self._playlists) else None
+        playlists = self.all()
+        return playlists[index] if 0 <= index < len(playlists) else None
+
+    def get_ui(self, index: int) -> Playlist | None:
+        playlists = self.all_for_ui()
+        return playlists[index] if 0 <= index < len(playlists) else None
+
+    def get_system(self, playlist_id: str) -> Playlist | None:
+        return next((item for item in self._playlists if item.id == playlist_id), None)
 
     def user_playlists(self) -> list[Playlist]:
-        """Return only user-created playlists, excluding Downloads."""
-        return [playlist for playlist in self._playlists if playlist.id != "downloads"]
+        """Return only user-created playlists, excluding system playlists."""
+        return [
+            playlist for playlist in self._playlists
+            if playlist.id not in {self.DOWNLOADS_ID, self.LIKED_ID}
+        ]
 
     def get_user(self, index: int) -> Playlist | None:
         playlists = self.user_playlists()
@@ -1029,7 +1724,15 @@ class PlaylistStore:
             return track
         if track.local_path == downloaded.local_path:
             return track
-        return Track(track.title, track.url, track.duration, track.uploader, downloaded.local_path)
+        return Track(
+            track.title,
+            track.url,
+            track.duration,
+            track.uploader,
+            downloaded.local_path,
+            track.genre,
+            track.channel_id,
+        )
 
     def is_downloaded(self, track: Track) -> bool:
         return bool(self.resolve_track(track).local_path)
@@ -1056,11 +1759,18 @@ class PlaylistStore:
         return True
 
     def add_track(self, playlist: Playlist, track: Track) -> bool:
-        if playlist.id == "downloads":
+        if playlist.id == self.DOWNLOADS_ID:
             return False
         # User playlists store YouTube metadata only; local availability is
         # resolved dynamically from the Downloads playlist when playing.
-        track = Track(track.title, track.url, track.duration, track.uploader)
+        track = Track(
+            track.title,
+            track.url,
+            track.duration,
+            track.uploader,
+            genre=track.genre,
+            channel_id=track.channel_id,
+        )
         if any(item.url == track.url for item in playlist.tracks):
             return False
         playlist.tracks.append(track)
@@ -1086,7 +1796,7 @@ class PlaylistStore:
             return None
         removed = playlist.tracks.pop(index)
         self._save_playlist(playlist)
-        if playlist.pinned and removed.local_path:
+        if playlist.id == self.DOWNLOADS_ID and removed.local_path:
             try:
                 Path(removed.local_path).unlink(missing_ok=True)
             except OSError:
@@ -1095,20 +1805,21 @@ class PlaylistStore:
 
     def toggle_pin(self, playlist: Playlist) -> bool | None:
         """Toggle a user playlist's pinned state and keep Downloads first."""
-        if playlist.id == "downloads" or playlist not in self._playlists:
+        if playlist.id in {self.DOWNLOADS_ID, self.LIKED_ID} or playlist not in self._playlists:
             return None
         playlist.pinned = not playlist.pinned
-        downloads = self._playlists[0]
-        custom = self._playlists[1:]
+        downloads = self.get_system(self.DOWNLOADS_ID)
+        custom = [item for item in self._playlists if item.id not in {self.DOWNLOADS_ID, self.LIKED_ID}]
         pinned = [item for item in custom if item.pinned]
         unpinned = [item for item in custom if not item.pinned]
-        self._playlists = [downloads, *pinned, *unpinned]
+        liked = self.get_system(self.LIKED_ID)
+        self._playlists = [item for item in (downloads, liked, *pinned, *unpinned) if item is not None]
         self._save_manifest()
         return playlist.pinned
 
     def delete_playlist(self, playlist: Playlist) -> bool:
         """Delete a user playlist and its metadata, never the pinned Downloads list."""
-        if playlist.id == "downloads" or playlist not in self._playlists:
+        if playlist.id in {self.DOWNLOADS_ID, self.LIKED_ID} or playlist not in self._playlists:
             return False
         self._playlists = [item for item in self._playlists if item.id != playlist.id]
         try:
@@ -1139,7 +1850,15 @@ class Downloader:
         downloaded = next((path for path in reversed(candidates) if path.exists()), None)
         if downloaded is None:
             raise RuntimeError("Download completed but its output file was not found")
-        return Track(track.title, track.url, track.duration, track.uploader, str(downloaded))
+        return Track(
+            track.title,
+            track.url,
+            track.duration,
+            track.uploader,
+            str(downloaded),
+            track.genre,
+            track.channel_id,
+        )
 
 
 class TUI:
@@ -1151,7 +1870,7 @@ class TUI:
         self.tab = 0  # 0 results, 1 queue
         self.running = True
         self.showing_help = False
-        curses.curs_set(0)
+        _safe_curs_set(0)
         screen.nodelay(True)
         screen.keypad(True)
         if initial_query:
@@ -1171,7 +1890,7 @@ class TUI:
     def prompt_search(self) -> None:
         height, _ = self.screen.getmaxyx()
         self.screen.nodelay(False)
-        curses.curs_set(1)
+        _safe_curs_set(1)
         query_chars: list[str] = []
         cancelled = False
         try:
@@ -1181,8 +1900,11 @@ class TUI:
                 visible = query_text[-display_width:]
                 self.screen.move(height - 1, 0)
                 self.screen.clrtoeol()
-                self.screen.addnstr(height - 1, 0, f"Search: {visible}", self.screen.getmaxyx()[1] - 1)
-                self.screen.refresh()
+                _safe_addnstr(self.screen, height - 1, 0, f"Search: {visible}", self.screen.getmaxyx()[1] - 1)
+                try:
+                    self.screen.refresh()
+                except curses.error:
+                    pass
                 key = self.screen.getch()
                 if key in (27, 3):  # Esc/Ctrl-c cancels without changing results.
                     cancelled = True
@@ -1197,8 +1919,11 @@ class TUI:
         finally:
             self.screen.move(height - 1, 0)
             self.screen.clrtoeol()
-            self.screen.refresh()
-        curses.curs_set(0)
+            try:
+                self.screen.refresh()
+            except curses.error:
+                pass
+        _safe_curs_set(0)
         self.screen.nodelay(True)
         query = "".join(query_chars).strip()
         if cancelled:
@@ -1221,7 +1946,7 @@ class TUI:
             duration = format_time(item.duration)
             text = f"{marker} {index + 1:2}. {item.label}  [{duration}]"
             attr = curses.A_REVERSE if index == selected else curses.A_NORMAL
-            self.screen.addnstr(top + line, 1, self.clipped(text, width - 2), width - 2, attr)
+            _safe_addnstr(self.screen, top + line, 1, self.clipped(text, width - 2), width - 2, attr)
 
     def draw(self) -> None:
         self.screen.erase()
@@ -1232,14 +1957,14 @@ class TUI:
         duration = current.duration if current else 0
         mode = "ERROR" if current and self.player.playback_failed else "PAUSED" if paused else "PLAYING" if current else "IDLE"
         loop = " LOOP" if self.player.loop else " PLOOP" if self.player.playlist_loop else ""
-        self.screen.addnstr(0, 1, f" OPENTUNE  ·  {mode}{loop}", width - 2, curses.A_BOLD)
-        self.screen.hline(1, 0, curses.ACS_HLINE, width)
-        self.screen.addnstr(2, 2, self.clipped(title, width - 4), width - 4, curses.A_BOLD)
-        self.screen.addnstr(3, 2, f"{format_time(position)} / {format_time(duration)}", width - 4, curses.A_DIM)
-        self.screen.hline(5, 0, curses.ACS_HLINE, width)
+        _safe_addnstr(self.screen, 0, 1, f" OPENTUNE  ·  {mode}{loop}", width - 2, curses.A_BOLD)
+        _safe_hline(self.screen, 1, 0, curses.ACS_HLINE, width)
+        _safe_addnstr(self.screen, 2, 2, self.clipped(title, width - 4), width - 4, curses.A_BOLD)
+        _safe_addnstr(self.screen, 3, 2, f"{format_time(position)} / {format_time(duration)}", width - 4, curses.A_DIM)
+        _safe_hline(self.screen, 5, 0, curses.ACS_HLINE, width)
         tabs = "[ Results ]" if self.tab == 0 else "  Results  "
         tabs += "     " + ("[ Queue ]" if self.tab == 1 else "  Queue  ")
-        self.screen.addnstr(6, 2, tabs, width - 4, curses.A_BOLD)
+        _safe_addnstr(self.screen, 6, 2, tabs, width - 4, curses.A_BOLD)
         list_height = max(1, height - 10)
         if self.showing_help:
             self.draw_help(8, width, list_height)
@@ -1247,10 +1972,14 @@ class TUI:
             self.draw_track_list(self.results, self.result_index, 8, list_height, width)
         else:
             self.draw_track_list(self.player.queue, self.queue_index, 8, list_height, width)
-        self.screen.hline(height - 2, 0, curses.ACS_HLINE, width)
+        _safe_hline(self.screen, height - 2, 0, curses.ACS_HLINE, width)
         status = self.clipped(self.player.message, width - 4)
-        self.screen.addnstr(height - 1, 2, status, width - 4, curses.A_DIM)
-        self.screen.refresh()
+        _safe_addnstr(self.screen, height - 1, 2, status, width - 4, curses.A_DIM)
+        try:
+            self.screen.noutrefresh()
+            curses.doupdate()
+        except curses.error:
+            pass
 
     def draw_help(self, top: int, width: int, height: int) -> None:
         lines = [
@@ -1268,7 +1997,7 @@ class TUI:
         ]
         for index, line in enumerate(lines[:height]):
             attr = curses.A_BOLD if index == 0 else curses.A_NORMAL
-            self.screen.addnstr(top + index, 2, self.clipped(line, width - 4), width - 4, attr)
+            _safe_addnstr(self.screen, top + index, 2, self.clipped(line, width - 4), width - 4, attr)
 
     def move(self, delta: int) -> None:
         if self.tab == 0:
@@ -1360,9 +2089,10 @@ class PlaylistTUI:
     def __init__(self, screen: curses.window, player: Player, store: PlaylistStore, initial_query: str = "") -> None:
         self.screen, self.player, self.store = screen, player, store
         self.player.track_resolver = self.store.resolve_track
-        # Listening history and its preference signal live only for this run.
-        # Saved playlists remain the durable user data store.
-        self.history_store = HistoryStore(store.root.parent, persist=False)
+        # Listening history and recommendation preferences are local JSON data;
+        # saved playlists remain the durable user-facing source of truth.
+        self.history_store = HistoryStore(store.root.parent, persist=True)
+        self.recommendation_store = RecommendationStore(store.root.parent)
         self.player.history_store = self.history_store
         self.results: list[Track] = []
         self.suggestions: list[Track] = []
@@ -1389,6 +2119,12 @@ class PlaylistTUI:
         self._search_generation = 0
         self._history_signature: tuple[str, ...] | None = None
         self._suggestion_generation = 0
+        self._recommendation_generation = 0
+        self._recommendation_pending = False
+        self._liked_signature = ""
+        self.update_checker = ReleaseChecker()
+        self.update_info: ReleaseInfo | None = None
+        self.showing_update = False
         self.searching = False
         self.search_attr = curses.A_BOLD
         if curses.has_colors():
@@ -1399,10 +2135,22 @@ class PlaylistTUI:
                 self.search_attr = curses.color_pair(2) | curses.A_BOLD
             except curses.error:
                 pass
-        curses.curs_set(0)
+        _safe_curs_set(0)
         screen.nodelay(True)
         screen.keypad(True)
+        try:
+            screen.leaveok(True)
+            screen.idlok(True)
+            screen.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+        except (AttributeError, curses.error):
+            pass
         self.refresh_history_views()
+        self.refresh_recommendation_views()
+        cached_release = self.update_checker.cached()
+        if cached_release and version_tuple(cached_release.version) > version_tuple(__version__) and not self.update_checker.was_notified(cached_release.version):
+            self.update_info = cached_release
+            self.showing_update = True
+        self.update_checker.check_async(self._release_checked)
         if initial_query:
             self.search(initial_query)
 
@@ -1435,71 +2183,99 @@ class PlaylistTUI:
         return total_width if not self.panel_open else max(1, int(total_width * 0.6))
 
     def refresh_history_views(self) -> None:
-        """Refresh session history and build fresh, non-history suggestions."""
+        """Refresh the persistent listening-history tab."""
         history = self.history_store.tracks()
         self.history_results = history
-        signature = tuple(track.url for track in history)
-        if signature == self._history_signature:
+        self._history_signature = tuple(track.url for track in history)
+
+    def _release_checked(self, info: ReleaseInfo | None) -> None:
+        if info is None or version_tuple(info.version) <= version_tuple(__version__):
             return
-        self._history_signature = signature
-        self._suggestion_generation += 1
-        generation = self._suggestion_generation
-        self.suggestions = []
-        if not history:
+        if self.update_checker.was_notified(info.version):
             return
-        history_urls = {track.url for track in history}
-        preferred = {
-            artist: rank for rank, artist in enumerate(
-                self.history_store.preferred_artists(limit=len(history))
-            )
-        }
-        seeds = sorted(
-            history,
-            key=lambda track: (
-                preferred.get(track.uploader.strip().lower(), len(history)),
-                -self.history_store.preference_score(track),
-                history.index(track),
-            ),
-        )[:3]
+        self.update_info = info
+        self.showing_update = True
+        self.player.message = f"OpenTune {info.version} is available — press Esc to dismiss"
+
+    def _recommendation_seeds(self) -> list[Track]:
+        liked = self.store.get_system(PlaylistStore.LIKED_ID)
+        liked_tracks = list(liked.tracks) if liked else []
+        if liked_tracks:
+            return liked_tracks[-5:]
+        return self.history_store.tracks()[:3]
+
+    def refresh_recommendation_views(self, force: bool = False) -> None:
+        """Load cached Suggestions immediately and refresh them in the background."""
+        liked = self.store.get_system(PlaylistStore.LIKED_ID)
+        liked_tracks = list(liked.tracks) if liked else []
+        changed = self.recommendation_store.sync_liked(liked_tracks)
+        signature = self.recommendation_store.liked_signature
+        loaded = getattr(self, "_recommendation_loaded", False)
+        if signature != self._liked_signature or not loaded:
+            self.suggestions = self.recommendation_store.suggestions(liked_tracks)
+            self._liked_signature = signature
+            self._recommendation_loaded = True
+        if not force and not changed and (loaded or self.suggestions or self.recommendation_store.generated_at):
+            return
+        self._recommendation_generation += 1
+        generation = self._recommendation_generation
+        if force:
+            self.recommendation_store.clear_dismissals()
+            self.recommendation_store.save_suggestions([])
+            self.suggestions = []
+            self.player.message = "Refreshing personalised Suggestions…"
+        seeds = self._recommendation_seeds()
+        if not seeds:
+            return
+        self._recommendation_pending = True
 
         def worker() -> None:
-            additions: list[Track] = []
-            seen = set(history_urls)
-            for seed in seeds:
-                try:
-                    related = YouTube.mix_for(seed)
-                except RuntimeError:
-                    continue
-                for track in related:
-                    if track.url in seen:
-                        continue
-                    seen.add(track.url)
-                    additions.append(track)
-                    if len(additions) >= SEARCH_LIMIT:
-                        break
-                if len(additions) >= SEARCH_LIMIT:
-                    break
-            if generation != self._suggestion_generation:
-                return
-            self.suggestions.extend(additions)
+            try:
+                liked_urls = {track.url for track in liked_tracks}
+                generated = YouTube.recommendations(
+                    seeds,
+                    excluded=liked_urls | self.recommendation_store.dismissed,
+                    limit=SEARCH_LIMIT,
+                )
+                if generation != self._recommendation_generation:
+                    return
+                self.recommendation_store.save_suggestions(generated)
+                if generation == self._recommendation_generation:
+                    self.suggestions = self.recommendation_store.suggestions(liked_tracks)
+                    self.player.message = f"Suggestions ready: {len(self.suggestions)} songs"
+            except OpenTuneError:
+                if generation == self._recommendation_generation:
+                    self.player.message = "Network error while refreshing Suggestions"
+            finally:
+                self._recommendation_pending = False
 
         threading.Thread(target=worker, daemon=True).start()
 
     def search(self, query: str) -> None:
+        query = query.strip()
+        if not query:
+            self.clear_search()
+            return
         self._search_generation += 1
         generation = self._search_generation
         self.player.message = f"Searching YouTube for: {query}"
-        self.player.status = "SEARCHING"
+        self.player.status = STATE_SEARCHING
         self.searching = True
         self.draw()
 
         def worker() -> None:
             try:
                 results = YouTube.search(query)
-            except RuntimeError as error:
+            except NetworkError as error:
                 if generation == self._search_generation:
                     self.searching = False
-                    self.player.status = "PLAYING" if getattr(self.player, "current", None) else "IDLE"
+                    self.player.status = STATE_NETWORK_ERROR
+                    self.player.message = f"Network error: {error}"
+                return
+            except (SearchError, RuntimeError) as error:
+                if generation == self._search_generation:
+                    self.searching = False
+                    self.player.status = STATE_SEARCH_ERROR
                     self.player.message = str(error)
                 return
             if generation != self._search_generation:
@@ -1508,22 +2284,51 @@ class PlaylistTUI:
             self.result_index = 0
             self.set_tab("results")
             self.searching = False
-            self.player.status = "PLAYING" if getattr(self.player, "current", None) else "IDLE"
-            self.player.message = f"{len(results)} music results for “{query}”"
+            if results:
+                self.player.status = self._playback_status()
+                self.player.message = f"{len(results)} music results for “{query}”"
+            else:
+                self.player.status = STATE_NO_RESULTS
+                self.player.message = f"No music results for “{query}”"
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _playback_status(self) -> str:
+        if not getattr(self.player, "current", None):
+            return STATE_IDLE
+        status = getattr(self.player, "status", STATE_PLAYING)
+        return status if status in {
+            STATE_PAUSED,
+            STATE_PLAYING,
+            STATE_LOADING,
+            STATE_BUFFERING,
+            STATE_STOPPED,
+            STATE_NETWORK_ERROR,
+            STATE_PLAYBACK_ERROR,
+        } else STATE_PLAYING
+
+    def clear_search(self) -> None:
+        """Clear the active search and invalidate any stale worker response."""
+        self._search_generation += 1
+        self.searching = False
+        self.results = []
+        self.result_index = 0
+        self.set_tab("results")
+        self.player.status = self._playback_status()
+        self.player.message = "Search cleared"
 
     def prompt_line(self, label: str, suggest: bool = False) -> str | None:
         height, width = self.screen.getmaxyx()
         self.screen.nodelay(True)
         self.screen.timeout(50)
-        curses.curs_set(1)
+        _safe_curs_set(1)
         chars: list[str] = []
         cursor = 0
         suggestions: list[Track] = []
         suggestion_index = 0
         suggestion_query = ""
         suggestion_generation = 0
+        suggestion_cache: dict[str, list[Track]] = {}
         cancelled = False
 
         def request_suggestions(query: str) -> None:
@@ -1532,6 +2337,9 @@ class PlaylistTUI:
             generation = suggestion_generation
             if len(query.strip()) < 2:
                 suggestions.clear()
+                return
+            if query in suggestion_cache:
+                suggestions[:] = suggestion_cache[query]
                 return
 
             def worker() -> None:
@@ -1547,6 +2355,7 @@ class PlaylistTUI:
                 if generation == suggestion_generation:
                     known = {track.url for track in suggestions}
                     suggestions.extend(track for track in found if track.url not in known)
+                    suggestion_cache[query] = list(suggestions[:SUGGESTION_CACHE_LIMIT])
 
             threading.Thread(target=worker, daemon=True).start()
 
@@ -1567,7 +2376,7 @@ class PlaylistTUI:
                 start = max(0, min(cursor - available + 1, len(chars) - available))
                 visible_query = "".join(chars[start:start + available])
                 text = prefix + visible_query
-                self.screen.addnstr(height - 1, 0, text, width - 1)
+                _safe_addnstr(self.screen, height - 1, 0, text, width - 1)
                 visible_suggestions = suggestions[: max(1, min(5, height - 2))] if (
                     suggest and query_text.strip()
                 ) else []
@@ -1582,20 +2391,21 @@ class PlaylistTUI:
                         source = "[history] " if track.url in history_urls else ""
                         self.screen.move(row, 0)
                         self.screen.clrtoeol()
-                        self.screen.addnstr(row, 0, self.clipped(f"{marker}{source}{track.label}", width - 1), width - 1, curses.A_DIM)
+                        _safe_addnstr(self.screen, row, 0, self.clipped(f"{marker}{source}{track.label}", width - 1), width - 1, curses.A_DIM)
                 cursor_col = min(width - 1, len(prefix) + cursor - start)
                 self.screen.move(height - 1, cursor_col)
-                self.screen.refresh()
-                key = self.screen.getch()
+                try:
+                    self.screen.refresh()
+                except curses.error:
+                    pass
+                key = read_prompt_key(self.screen)
                 if key < 0:
                     continue
+                if key >= ALT_TAB_BASE + 1 and key <= ALT_TAB_BASE + 4:
+                    self.tab = key - ALT_TAB_BASE - 1
+                    self.clear_visual()
+                    continue
                 if key in (27, 3):
-                    if key == 27:
-                        alt_key = self.screen.getch()
-                        if ord("1") <= alt_key <= ord("4"):
-                            self.tab = alt_key - ord("1")
-                            self.clear_visual()
-                            continue
                     cancelled = True
                     break
                 if key in (10, 13, curses.KEY_ENTER):
@@ -1621,9 +2431,9 @@ class PlaylistTUI:
                     cursor = 0
                 elif key in (curses.KEY_END,):
                     cursor = len(chars)
-                elif key in (getattr(curses, "KEY_CLEFT", -999),):
+                elif is_word_left_key(key):
                     cursor = move_word_left(chars, cursor)
-                elif key in (getattr(curses, "KEY_CRIGHT", -999),):
+                elif is_word_right_key(key):
                     cursor = move_word_right(chars, cursor)
                 elif suggest and key in (curses.KEY_DOWN, curses.KEY_UP):
                     if visible_suggestions:
@@ -1644,8 +2454,11 @@ class PlaylistTUI:
             for row in range(max(0, height - min(5, height - 2) - 1), height - 1):
                 self.screen.move(row, 0)
                 self.screen.clrtoeol()
-            self.screen.refresh()
-        curses.curs_set(0)
+            try:
+                self.screen.refresh()
+            except curses.error:
+                pass
+        _safe_curs_set(0)
         self.screen.timeout(0)
         self.screen.nodelay(True)
         return None if cancelled else "".join(chars).strip()
@@ -1679,6 +2492,8 @@ class PlaylistTUI:
             self.player.message = "Search cancelled"
         elif query:
             self.search(query)
+        else:
+            self.clear_search()
 
     def prompt_playlist_number(self) -> None:
         value = self.prompt_line("Playlist number (use cN for current song)")
@@ -1714,8 +2529,11 @@ class PlaylistTUI:
         self.screen.nodelay(False)
         self.screen.move(height - 1, 0)
         self.screen.clrtoeol()
-        self.screen.addnstr(height - 1, 0, f"{message} [y/Enter yes · n no]", width - 1)
-        self.screen.refresh()
+        _safe_addnstr(self.screen, height - 1, 0, f"{message} [y/Enter yes · n no]", width - 1)
+        try:
+            self.screen.refresh()
+        except curses.error:
+            pass
         while True:
             key = self.screen.getch()
             if key in (ord("y"), ord("Y"), 10, 13, curses.KEY_ENTER):
@@ -1727,7 +2545,10 @@ class PlaylistTUI:
         self.screen.nodelay(True)
         self.screen.move(height - 1, 0)
         self.screen.clrtoeol()
-        self.screen.refresh()
+        try:
+            self.screen.refresh()
+        except curses.error:
+            pass
         return answer
 
     def focused_main_track(self) -> Track | None:
@@ -1761,7 +2582,7 @@ class PlaylistTUI:
     def current_playlist(self) -> Playlist | None:
         if self.active_playlist_id is None:
             return None
-        return next((item for item in self.store.all() if item.id == self.active_playlist_id), None)
+        return next((item for item in self.store.all_for_ui() if item.id == self.active_playlist_id), None)
 
     def visible_playlist_tracks(self, playlist: Playlist) -> list[tuple[int, Track]]:
         # Find mode highlights a match without filtering the playlist list.
@@ -1798,7 +2619,7 @@ class PlaylistTUI:
 
     def draw_track_list(self, items: list[Track], selected: int, top: int, height: int, left: int, width: int, focus_name: str = "main", empty_message: str = "Nothing here yet.") -> None:
         if not items:
-            self.screen.addnstr(top, left + 1, empty_message, max(1, width - 2), curses.A_DIM)
+            _safe_addnstr(self.screen, top, left + 1, empty_message, max(1, width - 2), curses.A_DIM)
             return
         start = max(0, min(selected - height + 1, len(items) - height))
         for line, index in enumerate(range(start, min(len(items), start + height))):
@@ -1810,11 +2631,12 @@ class PlaylistTUI:
             is_focused = index == selected and self.focus == focus_name
             attr = curses.A_REVERSE if is_focused else curses.A_DIM if index in selected_indices else curses.A_NORMAL
             clipped = self.clipped(text, width - 2)
-            self.screen.addnstr(top + line, left + 1, clipped, max(1, width - 2), attr)
+            _safe_addnstr(self.screen, top + line, left + 1, clipped, max(1, width - 2), attr)
             query = self.search_query_for(focus_name).lower().strip()
             match_start = clipped.lower().find(query) if query else -1
             while match_start >= 0:
-                self.screen.addnstr(
+                _safe_addnstr(
+                    self.screen,
                     top + line,
                     left + 1 + match_start,
                     clipped[match_start:match_start + len(query)],
@@ -1859,33 +2681,34 @@ class PlaylistTUI:
 
     def draw_main(self, width: int) -> None:
         self.refresh_history_views()
+        self.refresh_recommendation_views()
         height, _ = self.screen.getmaxyx()
         current = self.player.current
         position, paused = self.player.mpv.state() if current else (0, False)
         title = current.title if current else "Nothing playing"
         if current and self.store.is_downloaded(current):
             title += " [d]"
-        status = getattr(self.player, "status", "IDLE")
+        status = getattr(self.player, "status", STATE_IDLE)
         mode = (
-            status if status in {"SEARCHING", "LOADING"}
-            else "ERROR" if current and self.player.playback_failed
-            else "PAUSED" if paused else status
+            STATE_PLAYBACK_ERROR if current and self.player.playback_failed and status != STATE_NETWORK_ERROR
+            else STATE_PAUSED if paused and status not in {STATE_SEARCHING, STATE_LOADING, STATE_NETWORK_ERROR, STATE_PLAYBACK_ERROR}
+            else status
         )
         loop = " LOOP" if self.player.loop else " PLOOP" if self.player.playlist_loop else ""
-        self.screen.addnstr(0, 1, f" OPENTUNE  ·  {mode}{loop}", max(1, width - 2), curses.A_BOLD)
+        _safe_addnstr(self.screen, 0, 1, f" OPENTUNE  ·  {mode}{loop}", max(1, width - 2), curses.A_BOLD)
         if not self.panel_open:
             version = f"v{__version__}"
-            self.screen.addnstr(0, max(1, width - len(version) - 2), version, len(version), curses.A_DIM)
-        self.screen.hline(1, 0, curses.ACS_HLINE, width)
-        self.screen.addnstr(2, 2, self.clipped(title, width - 4), max(1, width - 4), curses.A_BOLD)
+            _safe_addnstr(self.screen, 0, max(1, width - len(version) - 2), version, len(version), curses.A_DIM)
+        _safe_hline(self.screen, 1, 0, curses.ACS_HLINE, width)
+        _safe_addnstr(self.screen, 2, 2, self.clipped(title, width - 4), max(1, width - 4), curses.A_BOLD)
         duration = current.duration if current else 0
-        self.screen.addnstr(3, 2, f"{format_time(position)} / {format_time(duration)}", max(1, width - 4), curses.A_DIM)
-        self.screen.hline(5, 0, curses.ACS_HLINE, width)
+        _safe_addnstr(self.screen, 3, 2, f"{format_time(position)} / {format_time(duration)}", max(1, width - 4), curses.A_DIM)
+        _safe_hline(self.screen, 5, 0, curses.ACS_HLINE, width)
         tabs = "     ".join(
             f"[ {name} ]" if self.tab_context() == name.lower() else f"  {name}  "
             for name in TAB_NAMES
         )
-        self.screen.addnstr(6, 2, tabs, max(1, width - 4), curses.A_BOLD)
+        _safe_addnstr(self.screen, 6, 2, tabs, max(1, width - 4), curses.A_BOLD)
         list_height = max(1, height - 10)
         context = self.tab_context()
         if context == "results":
@@ -1901,7 +2724,7 @@ class PlaylistTUI:
                 list_height,
                 0,
                 width,
-                empty_message="Play songs to build history-based suggestions.",
+                empty_message="No cached Suggestions yet; press R to refresh.",
             )
         else:
             self.history_results = self.history_store.tracks() if hasattr(self, "history_store") else getattr(self, "history_results", [])
@@ -1915,19 +2738,20 @@ class PlaylistTUI:
                 width,
                 empty_message="No listening history yet.",
             )
-        self.screen.hline(height - 2, 0, curses.ACS_HLINE, width)
-        self.screen.addnstr(height - 1, 2, self.clipped(self.player.message, width - 4), max(1, width - 4), curses.A_DIM)
+        _safe_hline(self.screen, height - 2, 0, curses.ACS_HLINE, width)
+        _safe_addnstr(self.screen, height - 1, 2, self.clipped(self.player.message, width - 4), max(1, width - 4), curses.A_DIM)
 
     def draw_help(self, top: int, width: int, height: int) -> None:
         lines = [
-            "OpenTune 1.0.0 — key reference",
+            "OpenTune 1.1.0 — key reference",
             "Tab order: 1 Suggestions · 2 Results · 3 Queue · 4 History",
             "Alt-1..4 jump directly to a tab · Tab/Shift-Tab cycle tabs",
             "",
             "MAIN WINDOW",
             "j/k or ↑/↓ move · g/G top/bottom · Ctrl-b/f half-page",
             "[/] previous/next search result · Enter play · a add to Queue",
-            "v visual selection · d download · D delete Queue · c clear Queue",
+            "v visual selection · d download · D delete Queue/Suggestions",
+            "y like/unlike · R refresh Suggestions · c clear Queue",
             "u undo · Ctrl-r redo · f find Queue · n/N next/previous match",
             "s shuffle Queue · pN add to playlist · Ctrl-d download current",
             "",
@@ -1945,20 +2769,21 @@ class PlaylistTUI:
         ]
         for index, line in enumerate(lines[:height]):
             attr = curses.A_BOLD if index in (0, 4, 12, 17) else curses.A_NORMAL
-            self.screen.addnstr(top + index, 1, self.clipped(line, width - 2), max(1, width - 2), attr)
+            _safe_addnstr(self.screen, top + index, 1, self.clipped(line, width - 2), max(1, width - 2), attr)
 
     def draw_help_overlay(self) -> None:
         """Render key help as a centered, non-blocking floating window."""
         height, width = self.screen.getmaxyx()
         lines = [
-            "OpenTune 1.0.0 — key reference",
+            "OpenTune 1.1.0 — key reference",
             "Tab order: 1 Suggestions · 2 Results · 3 Queue · 4 History",
             "Alt-1..4 jump directly to a tab · Tab/Shift-Tab cycle tabs",
             "",
             "MAIN WINDOW",
             "j/k or ↑/↓ move · g/G top/bottom · Ctrl-b/f half-page",
             "[/] previous/next search result · Enter play · a add to Queue",
-            "v visual selection · d download · D delete Queue · c clear Queue",
+            "v visual selection · d download · D delete Queue/Suggestions",
+            "y like/unlike · R refresh Suggestions · c clear Queue",
             "u undo · Ctrl-r redo · f find Queue · n/N next/previous match",
             "s shuffle Queue · pN add to playlist · Ctrl-d download current",
             "",
@@ -1985,51 +2810,100 @@ class PlaylistTUI:
             modal.box()
             for index, line in enumerate(lines[: box_height - 2], start=1):
                 attr = curses.A_BOLD if index in (1, 5, 13, 18) else curses.A_NORMAL
-                modal.addnstr(index, 2, self.clipped(line, box_width - 4), box_width - 4, attr)
-            modal.refresh()
+                _safe_addnstr(modal, index, 2, self.clipped(line, box_width - 4), box_width - 4, attr)
+            modal.noutrefresh()
+            curses.doupdate()
         except curses.error:
             return
 
     def draw_playlists(self, left: int, width: int) -> None:
         height, _ = self.screen.getmaxyx()
-        self.screen.vline(0, left, curses.ACS_VLINE, height)
+        _safe_vline(self.screen, 0, left, curses.ACS_VLINE, height)
         playlist = self.current_playlist()
         heading = "PLAYLISTS" if playlist is None else f"PLAYLIST: {playlist.name}"
         focus_attr = curses.A_BOLD if self.focus == "playlists" else curses.A_DIM
-        self.screen.addnstr(0, left + 2, self.clipped(heading, width - 3), max(1, width - 3), focus_attr)
-        self.screen.hline(1, left + 1, curses.ACS_HLINE, max(1, width - 1))
+        _safe_addnstr(self.screen, 0, left + 2, self.clipped(heading, width - 3), max(1, width - 3), focus_attr)
+        _safe_hline(self.screen, 1, left + 1, curses.ACS_HLINE, max(1, width - 1))
         if playlist is None:
-            items = self.store.all()
+            items = self.store.all_for_ui()
             user_number = 0
             for line, item in enumerate(items[: max(1, height - 5)]):
                 marker = "›" if line == self.playlist_index else " "
                 pin = "★ " if item.pinned else "  "
                 attr = curses.A_REVERSE if line == self.playlist_index and self.focus == "playlists" else curses.A_NORMAL
-                if item.id == "downloads":
+                if item.id in {PlaylistStore.DOWNLOADS_ID, PlaylistStore.LIKED_ID}:
                     label = f"{pin}{item.name}"
                 else:
                     user_number += 1
                     label = f"{user_number}. {pin}{item.name}"
                 text = f"{marker} {label} ({len(item.tracks)})"
-                self.screen.addnstr(3 + line, left + 2, self.clipped(text, width - 3), max(1, width - 3), attr)
-            footer = "a new · p pin · D delete · l enter"
+                _safe_addnstr(self.screen, 3 + line, left + 2, self.clipped(text, width - 3), max(1, width - 3), attr)
+            footer = "a new · p pin · D delete · l enter · y like in main"
         else:
             visible = self.visible_playlist_tracks(playlist)
             tracks = [track for _, track in visible]
             self.draw_track_list(tracks, self.playlist_track_index, 3, max(1, height - 7), left + 1, width - 1, "playlists")
             footer = f"{len(visible)} songs · a append" + (f" · find: {self.playlist_search}" if self.playlist_search else "")
-        self.screen.addnstr(height - 2, left + 2, self.clipped(footer, width - 3), max(1, width - 3), curses.A_DIM)
+        _safe_addnstr(self.screen, height - 2, left + 2, self.clipped(footer, width - 3), max(1, width - 3), curses.A_DIM)
 
     def draw(self) -> None:
-        self.screen.erase()
-        height, width = self.screen.getmaxyx()
-        main_width = self.main_width(width)
-        self.draw_main(main_width)
-        if self.panel_open:
-            self.draw_playlists(main_width, width - main_width)
-        self.screen.refresh()
+        try:
+            self.screen.erase()
+            height, width = self.screen.getmaxyx()
+            main_width = self.main_width(width)
+            self.draw_main(main_width)
+            if self.panel_open:
+                self.draw_playlists(main_width, width - main_width)
+            self.screen.noutrefresh()
+            curses.doupdate()
+        except curses.error:
+            # A terminal resize can invalidate a window between getmaxyx and
+            # the final draw. The next frame will render against new bounds.
+            return
         if self.showing_help:
             self.draw_help_overlay()
+        elif self.showing_update:
+            self.draw_update_overlay()
+
+    def draw_update_overlay(self) -> None:
+        info = self.update_info
+        if info is None:
+            return
+        height, width = self.screen.getmaxyx()
+        lines = [
+            "A new version of OpenTune is available!",
+            "",
+            "Discover the latest improvements, features and fixes.",
+            "",
+            f"Installed: v{__version__}",
+            f"Latest:    v{info.version}",
+            "",
+            "Update with: opentune --update",
+            "or:          pipx upgrade opentune",
+            "",
+            "Press Esc to dismiss.",
+        ]
+        box_height = min(max(8, height - 2), len(lines) + 2)
+        box_width = min(max(50, max(len(line) for line in lines) + 4), max(20, width - 4))
+        top = max(0, (height - box_height) // 2)
+        left = max(0, (width - box_width) // 2)
+        try:
+            modal = curses.newwin(box_height, box_width, top, left)
+            modal.erase()
+            modal.box()
+            for index, line in enumerate(lines[: box_height - 2], start=1):
+                _safe_addnstr(
+                    modal,
+                    index,
+                    2,
+                    self.clipped(line, box_width - 4),
+                    box_width - 4,
+                    curses.A_BOLD if index == 1 else curses.A_NORMAL,
+                )
+            modal.noutrefresh()
+            curses.doupdate()
+        except curses.error:
+            return
 
     def toggle_panel(self) -> None:
         self.panel_open = not self.panel_open
@@ -2076,7 +2950,7 @@ class PlaylistTUI:
 
     def move_to_edge_playlists(self, bottom: bool = False) -> None:
         if self.active_playlist_id is None:
-            self.playlist_index = max(0, len(self.store.all()) - 1) if bottom else 0
+            self.playlist_index = max(0, len(self.store.all_for_ui()) - 1) if bottom else 0
         else:
             count = len(self.visible_playlist_tracks(self.current_playlist()))
             self.playlist_track_index = max(0, count - 1) if bottom else 0
@@ -2091,7 +2965,7 @@ class PlaylistTUI:
 
     def move_playlists(self, delta: int) -> None:
         if self.active_playlist_id is None:
-            playlists = self.store.all()
+            playlists = self.store.all_for_ui()
             if playlists:
                 self.playlist_index = (self.playlist_index + delta) % len(playlists)
         else:
@@ -2103,7 +2977,7 @@ class PlaylistTUI:
     def enter_playlist(self) -> None:
         if self.active_playlist_id is not None:
             return
-        playlist = self.store.get(self.playlist_index)
+        playlist = self.store.get_ui(self.playlist_index)
         if playlist:
             self.active_playlist_id = playlist.id
             self.playlist_track_index = 0
@@ -2136,13 +3010,13 @@ class PlaylistTUI:
             self.player.message = "Playlist creation cancelled"
             return
         playlist = self.store.create(name)
-        self.playlist_index = len(self.store.all()) - 1
+        self.playlist_index = len(self.store.all_for_ui()) - 1
         self.player.message = f"Created playlist {playlist.name}"
 
     def rename_playlist(self) -> None:
-        playlist = self.current_playlist() if self.active_playlist_id else self.store.get(self.playlist_index)
-        if playlist is None or playlist.pinned:
-            self.player.message = "Downloads cannot be renamed"
+        playlist = self.current_playlist() if self.active_playlist_id else self.store.get_ui(self.playlist_index)
+        if playlist is None or playlist.id in {PlaylistStore.DOWNLOADS_ID, PlaylistStore.LIKED_ID}:
+            self.player.message = "System playlists cannot be renamed"
             return
         name = self.prompt_line("Rename playlist")
         if name is not None and self.store.rename(playlist, name):
@@ -2151,31 +3025,31 @@ class PlaylistTUI:
     def toggle_pin_playlist(self) -> None:
         if self.active_playlist_id is not None:
             return
-        playlist = self.store.get(self.playlist_index)
+        playlist = self.store.get_ui(self.playlist_index)
         if playlist is None:
             return
         pinned = self.store.toggle_pin(playlist)
         if pinned is None:
-            self.player.message = "Downloads is always pinned"
+            self.player.message = "System playlists are always pinned"
             return
-        self.playlist_index = self.store.all().index(playlist)
+        self.playlist_index = self.store.all_for_ui().index(playlist)
         self.player.message = f"{'Pinned' if pinned else 'Unpinned'} playlist: {playlist.name}"
 
     def delete_playlist(self) -> None:
         if self.active_playlist_id is not None:
             return
-        playlist = self.store.get(self.playlist_index)
+        playlist = self.store.get_ui(self.playlist_index)
         if playlist is None:
             return
-        if playlist.id == "downloads":
-            self.player.message = "Downloads playlist cannot be deleted"
+        if playlist.id in {PlaylistStore.DOWNLOADS_ID, PlaylistStore.LIKED_ID}:
+            self.player.message = "System playlists cannot be deleted"
             return
         if not self.prompt_confirm(f"Do you want to delete playlist '{playlist.name}'?"):
             self.player.message = "Deletion cancelled"
             return
         name = playlist.name
         if self.store.delete_playlist(playlist):
-            self.playlist_index = max(0, min(self.playlist_index, len(self.store.all()) - 1))
+            self.playlist_index = max(0, min(self.playlist_index, len(self.store.all_for_ui()) - 1))
             self.player.message = f"Deleted playlist: {name}"
 
     def find_playlist(self) -> None:
@@ -2361,6 +3235,48 @@ class PlaylistTUI:
         _, _, track = selected
         self.download_track(self.store.resolve_track(track))
 
+    def toggle_like(self) -> None:
+        """Add or remove selected main-pane tracks from Liked Songs."""
+        liked = self.store.get_system(PlaylistStore.LIKED_ID)
+        if liked is None:
+            self.player.message = "Liked Songs is unavailable"
+            return
+        tracks = self.focused_main_tracks()
+        if not tracks:
+            self.player.message = "Select a song to like"
+            return
+        liked_urls = {track.url for track in liked.tracks}
+        if all(track.url in liked_urls for track in tracks):
+            removed = 0
+            for index in reversed(range(len(liked.tracks))):
+                if liked.tracks[index].url in {track.url for track in tracks}:
+                    self.store.remove_track(liked, index)
+                    removed += 1
+            self.player.message = f"Removed {removed} song(s) from Liked Songs"
+        else:
+            added = sum(self.store.add_track(liked, track) for track in tracks)
+            self.player.message = f"Added {added} song(s) to Liked Songs"
+        self.refresh_recommendation_views()
+        self.clear_visual()
+
+    def dismiss_suggestions(self) -> None:
+        """Persistently dismiss selected Suggestions until manual refresh."""
+        if self.tab_context() != "suggestions":
+            self.player.message = "Switch to Suggestions to dismiss a recommendation"
+            return
+        indices = sorted(self.selected_indices_for("main"), reverse=True)
+        tracks = [self.suggestions[index] for index in indices if 0 <= index < len(self.suggestions)]
+        if not tracks:
+            self.player.message = "No recommendation selected"
+            return
+        for track in tracks:
+            self.recommendation_store.dismiss(track)
+        dismissed_urls = {track.url for track in tracks}
+        self.suggestions = [track for track in self.suggestions if track.url not in dismissed_urls]
+        self.result_index = min(self.result_index, max(0, len(self.suggestions) - 1))
+        self.clear_visual()
+        self.player.message = f"Dismissed {len(tracks)} recommendation(s); press R to refresh"
+
     def enqueue_playlist_track(self) -> None:
         selected = self.selected_playlist_tracks()
         if not selected:
@@ -2419,7 +3335,10 @@ class PlaylistTUI:
             elif context == "history" and getattr(self, "history_results", []):
                 self.player.start(self.history_results[self.history_index])
         elif key == ord(" "):
-            self.player.mpv.toggle_pause()
+            if hasattr(self.player, "toggle_pause"):
+                self.player.toggle_pause()
+            else:
+                self.player.mpv.toggle_pause()
         elif key == ord("h"):
             self.player.previous()
         elif key == ord("l"):
@@ -2446,8 +3365,13 @@ class PlaylistTUI:
                 self.download_track(track)
             else:
                 self.player.message = "No highlighted song to download"
-        elif key == ord("D") and context == "queue":
-            self.delete_queue_selected()
+        elif key == ord("D"):
+            if context == "queue":
+                self.delete_queue_selected()
+            elif context == "suggestions":
+                self.dismiss_suggestions()
+            else:
+                self.player.message = "D deletes tracks only from Queue or Suggestions"
         elif key == ord("c"):
             if self.player.queue and self.prompt_confirm("Clear the entire queue?"):
                 self.player.clear_queue()
@@ -2462,6 +3386,10 @@ class PlaylistTUI:
             self.prompt_playlist_number()
         elif key == ord("v"):
             self.toggle_visual(context)
+        elif key == ord("y"):
+            self.toggle_like()
+        elif key == ord("R") and context == "suggestions":
+            self.refresh_recommendation_views(force=True)
         elif key == 4:
             self.download_current()
 
@@ -2537,6 +3465,16 @@ class PlaylistTUI:
                 self.tab = alt_key - ord("1")
                 self.clear_visual()
                 return
+        if key == getattr(curses, "KEY_MOUSE", -999):
+            self.handle_mouse()
+            return
+        if getattr(self, "showing_update", False):
+            if key in (27, ord("?")):
+                self.showing_update = False
+                if getattr(self, "update_info", None):
+                    self.update_checker.mark_notified(self.update_info.version)
+                self.player.message = "Update notification dismissed"
+            return
         if self.showing_help:
             if key in (27, ord("?")):
                 self.showing_help = False
@@ -2576,7 +3514,10 @@ class PlaylistTUI:
             self.move_search_result(1)
             return
         if key == ord(" "):
-            self.player.mpv.toggle_pause()
+            if hasattr(self.player, "toggle_pause"):
+                self.player.toggle_pause()
+            else:
+                self.player.mpv.toggle_pause()
             return
         if key == 15:
             self.player.toggle_loop()
@@ -2625,6 +3566,9 @@ class PlaylistTUI:
         if key == ord("P"):
             self.toggle_panel()
             return
+        if key == ord("R") and self.tab_context() == "suggestions":
+            self.refresh_recommendation_views(force=True)
+            return
         if key == ord("?"):
             self.showing_help = not self.showing_help
             return
@@ -2632,6 +3576,47 @@ class PlaylistTUI:
             self.handle_playlists(key)
         else:
             self.handle_main(key)
+
+    def handle_mouse(self) -> None:
+        """Best-effort mouse/touch mapping for terminal emulators.
+
+        Termux and desktop terminal emulators may expose touchscreen taps as
+        mouse events. Keyboard controls remain the primary interface; a tap on
+        a main-list row selects it, and a tap in the playlist pane selects or
+        enters that pane.
+        """
+        try:
+            _, x, y, _, _ = curses.getmouse()
+        except curses.error:
+            return
+        height, width = self.screen.getmaxyx()
+        main_width = self.main_width(width)
+        if self.panel_open and x >= main_width:
+            self.focus = "playlists"
+            if y >= 3:
+                index = y - 3
+                if self.active_playlist_id is None and index < len(self.store.all_for_ui()):
+                    self.playlist_index = index
+                elif self.active_playlist_id is not None:
+                    self.playlist_track_index = max(0, index)
+            return
+        self.focus = "main"
+        if 8 <= y < height - 2:
+            index = y - 8
+            context = self.tab_context()
+            items = (
+                self.results if context == "results" else
+                self.player.queue if context == "queue" else
+                self.suggestions if context == "suggestions" else
+                self.history_results
+            )
+            if index < len(items):
+                if context in {"results", "suggestions"}:
+                    self.result_index = index
+                elif context == "queue":
+                    self.queue_index = index
+                else:
+                    self.history_index = index
 
     def show_update_notice_if_needed(self) -> None:
         state = NoticeState()
@@ -2654,8 +3639,9 @@ class PlaylistTUI:
                 if index + 2 >= box_height - 1:
                     break
                 attr = curses.A_BOLD if index == 0 else curses.A_NORMAL
-                modal.addnstr(index + 1, 2, self.clipped(line, box_width - 4), box_width - 4, attr)
-            modal.refresh()
+                _safe_addnstr(modal, index + 1, 2, self.clipped(line, box_width - 4), box_width - 4, attr)
+            modal.noutrefresh()
+            curses.doupdate()
             while modal.getch() != 27:
                 pass
         except curses.error:
@@ -2664,12 +3650,17 @@ class PlaylistTUI:
 
     def run(self) -> None:
         self.show_update_notice_if_needed()
-        while self.running:
-            self.draw()
-            key = self.screen.getch()
-            if key != -1:
-                self.handle(key)
-            time.sleep(0.08)
+        try:
+            while self.running:
+                self.draw()
+                key = self.screen.getch()
+                if key != -1:
+                    self.handle(key)
+                time.sleep(0.05)
+        except KeyboardInterrupt:
+            self.running = False
+            self.player.message = "Stopping OpenTune…"
+            raise
 
 
 def main() -> int:
@@ -2680,8 +3671,15 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="Check for and install the latest published OpenTune release",
+    )
     parser.add_argument("query", nargs="*", help="Search query to open on launch")
     args = parser.parse_args()
+    if args.update:
+        return update_installation()
     missing = require_tools()
     if missing:
         print(f"opentune: {missing}", file=sys.stderr)
@@ -2690,6 +3688,8 @@ def main() -> int:
     store = PlaylistStore()
     try:
         curses.wrapper(lambda screen: PlaylistTUI(screen, player, store, " ".join(args.query)).run())
+    except KeyboardInterrupt:
+        return 130
     except curses.error as error:
         print(f"opentune: terminal UI error: {error}", file=sys.stderr)
         return 1

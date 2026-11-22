@@ -10,9 +10,15 @@ from opentune.__main__ import (
     MPV,
     PlaylistStore,
     PlaylistTUI,
+    RecommendationStore,
+    ReleaseChecker,
+    ReleaseInfo,
     Track,
     YouTube,
+    delete_word_left,
     format_time,
+    move_word_left,
+    move_word_right,
 )
 
 
@@ -32,6 +38,7 @@ class OpenTuneTests(unittest.TestCase):
             history = HistoryStore(Path(directory))
             history.record(Track("Daft Punk - Get Lucky", "get", uploader="Daft Punk"))
             history.record(Track("Radiohead - Creep", "creep", uploader="Radiohead"))
+            history.close()
             reloaded = HistoryStore(Path(directory))
             self.assertEqual(reloaded.search("dft")[0].url, "get")
             self.assertEqual(reloaded.search("crep")[0].url, "creep")
@@ -46,6 +53,90 @@ class OpenTuneTests(unittest.TestCase):
         with patch.object(YouTube, "search", return_value=candidates):
             suggestions = YouTube.suggestions("dft", limit=5)
         self.assertEqual([track.url for track in suggestions], ["get", "one-more"])
+
+    def test_search_ranking_prefers_official_unless_version_is_requested(self):
+        candidates = [
+            Track("Song karaoke version", "karaoke", uploader="Channel"),
+            Track("Song (Official Audio)", "official", uploader="Artist Official"),
+            Track("Song instrumental", "instrumental", uploader="Channel"),
+        ]
+        ranked = YouTube.rank_search_results("Song", candidates)
+        self.assertEqual(ranked[0].url, "official")
+        requested = YouTube.rank_search_results("Song karaoke", candidates)
+        self.assertEqual(requested[0].url, "karaoke")
+
+    def test_word_editing_helpers(self):
+        chars = list("Daft   Punk Get Lucky")
+        cursor = len(chars)
+        self.assertEqual(move_word_left(chars, cursor), len("Daft   Punk Get "))
+        cursor = delete_word_left(chars, cursor)
+        self.assertEqual("".join(chars), "Daft   Punk Get ")
+        self.assertEqual(move_word_right(chars, 0), len("Daft"))
+
+    def test_clear_search_removes_stale_results(self):
+        class PlayerStub:
+            current = None
+            status = "SEARCHING"
+            message = ""
+
+        tui = PlaylistTUI.__new__(PlaylistTUI)
+        tui.player = PlayerStub()
+        tui.results = [Track("stale", "stale")]
+        tui.result_index = 0
+        tui.tab = 1
+        tui._search_generation = 4
+        tui.searching = True
+        tui.clear_visual = lambda: None
+        tui.clear_search()
+        self.assertEqual(tui.results, [])
+        self.assertEqual(tui.result_index, 0)
+        self.assertEqual(tui._search_generation, 5)
+        self.assertEqual(tui.player.status, "IDLE")
+
+    def test_liked_songs_is_persistent_and_protected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = PlaylistStore(Path(directory) / "Playlists")
+            liked = store.get_system(PlaylistStore.LIKED_ID)
+            track = Track("Liked", "liked-url", uploader="Artist")
+            self.assertIsNotNone(liked)
+            self.assertTrue(store.add_track(liked, track))
+            self.assertFalse(store.rename(liked, "Other"))
+            self.assertFalse(store.delete_playlist(liked))
+            reloaded = PlaylistStore(Path(directory) / "Playlists")
+            self.assertEqual(reloaded.get_system(PlaylistStore.LIKED_ID).tracks, [track])
+
+    def test_suggestion_dismissal_survives_reload_until_refresh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = RecommendationStore(root)
+            track = Track("Recommended", "recommended-url", uploader="Artist")
+            store.save_suggestions([track])
+            store.dismiss(track)
+            reloaded = RecommendationStore(root)
+            self.assertEqual(reloaded.suggestions(), [])
+            reloaded.save_suggestions([track], reset_dismissed=True)
+            self.assertEqual(reloaded.suggestions(), [track])
+
+    def test_release_cache_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checker = ReleaseChecker(Path(directory) / "update.json")
+            checker._save({
+                "latest_version": "1.1.0",
+                "url": "https://example.test/release",
+                "name": "v1.1.0",
+                "notified_version": "1.1.0",
+            })
+            self.assertEqual(checker.cached(), ReleaseInfo("1.1.0", "https://example.test/release", "v1.1.0"))
+            self.assertTrue(checker.was_notified("1.1.0"))
+
+    def test_playback_network_error_has_dedicated_state(self):
+        from opentune.__main__ import Player
+
+        player = Player()
+        player._playback_error("network timeout")
+        self.assertEqual(player.status, "NETWORK ERROR")
+        self.assertIn("Network error", player.message)
+        player.close()
 
     def test_home_tabs_cycle_forward_and_backward(self):
         tui = PlaylistTUI.__new__(PlaylistTUI)
@@ -105,6 +196,14 @@ class OpenTuneTests(unittest.TestCase):
             mix = YouTube.mix_for(seed)
         self.assertEqual([track.title for track in mix], ["Different Song", "Third Song"])
         self.assertEqual(fetch.call_args.args[0], "https://www.youtube.com/watch?v=seed&list=RDseed")
+
+    def test_mix_uses_available_genre_metadata_to_avoid_unrelated_tracks(self):
+        seed = Track("Rap seed", "seed", uploader="Artist", genre="Rap")
+        candidates = [
+            Track("Pop song", "pop", uploader="Pop artist", genre="Pop"),
+            Track("Rap song", "rap", uploader="Rap artist", genre="Rap"),
+        ]
+        self.assertEqual([track.url for track in YouTube._unique_mix(seed, candidates)], ["rap"])
 
     def test_music_filter_rejects_non_music_results(self):
         self.assertTrue(YouTube._looks_like_music({"title": "Artist - Song (Official Audio)", "duration": 210}))

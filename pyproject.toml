@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opentune"
-version = "1.0.0"
+version = "1.1.0"
 description = "A Vim-keyed terminal music player for YouTube audio streams"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -16,6 +16,7 @@ classifiers = [
     "Environment :: Console",
     "Intended Audience :: End Users/Desktop",
     "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
@@ -26,6 +27,9 @@ classifiers = [
     "Topic :: Terminals",
 ]
 keywords = ["music", "youtube", "terminal", "tui", "mpv", "yt-dlp"]
+
+[project.optional-dependencies]
+windows = ["windows-curses>=2.4"]
 
 [project.urls]
 Homepage = "https://github.com/rpnchlr/opentune"

@@ -1,17 +1,19 @@
 # OpenTune
 
-OpenTune is a terminal music player for Linux/Unix systems. Search YouTube for a song, choose a result using Vim-style keys, and listen without leaving the terminal.
+OpenTune is a terminal music player for Linux, Termux/Android, and Windows. Search YouTube for a song, choose a result using Vim-style keys, and listen without leaving the terminal.
 
 It is deliberately small: OpenTune streams audio, with optional local downloads,
 and does not require a browser, YouTube account, or separate media library.
 Playback happens in a full-screen terminal UI (TUI).
 
-## v1.0.0
+## v1.1.0
 
-This release makes Suggestions the home tab, adds circular live suggestions,
-word-wise search editing, session-only listening history, compact in-memory
-preference signals, direct Alt-1..4 tab switching, visible SEARCHING/LOADING
-states, a floating help window, and a version indicator.
+This release hardens the curses renderer with bounded double-buffered drawing,
+fixes empty-search clearing and terminal word-editing sequences, adds explicit
+network/search/playback states, persistent listening history, a protected
+Liked Songs system playlist, cached personalised Suggestions with persistent
+dismissals, asynchronous GitHub update checks, `opentune --update`, best-effort
+terminal mouse/touch input, and a Windows PowerShell installer.
 
 ## What it can do
 
@@ -20,13 +22,15 @@ states, a floating help window, and a version indicator.
 - Play, pause, go to the next/previous track, seek, and loop a track
 - Use Vim-like navigation (`h`, `j`, `k`, `l`) as well as arrow keys
 - Create a continuously replenished related mix after you choose a song
-- Show the upcoming mix in Queue and fresh, history-informed recommendations in Suggestions
+- Show the upcoming mix in Queue and cached, Liked-Songs-informed recommendations in Suggestions
 - Create persistent playlists in a right-side terminal pane
 - Download tracks to a pinned local Downloads playlist
 - Search and edit playlist contents without affecting the playback queue
 - Mark contiguous songs with visual mode (`v`) for bulk queue/playlist actions
 - Prefer downloaded local files automatically when a matching song is played
-- Keep listening history for the current session only and use compact preference signals for Suggestions
+- Persist listening history and use Liked Songs plus compact preference signals for Suggestions
+- Like/unlike songs in the protected **Liked Songs** system playlist
+- Dismiss Suggestions persistently until a manual refresh
 - Cut, copy, and paste songs between playlists
 - Show live music suggestions while editing a search query
 - Loop an entire open playlist with `o`
@@ -40,14 +44,21 @@ OpenTune coordinates two established command-line programs:
 2. OpenTune shows those results in its terminal UI.
 3. When a track is selected, `mpv` opens the YouTube URL and streams the best available audio format.
 4. OpenTune controls `mpv` through a private local socket, so pause, seek, loop, and progress updates work while the TUI remains open.
-5. In the background, OpenTune asks YouTube for its radio/mix playlist seeded by the selected video, then filters alternate uploads of the same song before filling the queue. If YouTube does not expose a radio playlist, OpenTune falls back to other songs from the selected artist.
+5. In the background, OpenTune asks YouTube for its radio/mix playlist seeded by the selected video, ranks official and contextually related versions, and filters alternate uploads of the same song before filling the queue. If YouTube does not expose a radio playlist, OpenTune falls back to other songs from the selected artist.
+6. Suggestions are generated from Liked Songs (with persisted listening history as a fallback), cached locally, and refreshed without blocking startup.
 
 Search, first-time stream playback, and mix generation need an active internet
 connection. `d` saves the highlighted song and `Ctrl-d` saves the currently
 playing song locally for offline playback. Search prompts support arrow keys,
-Ctrl-left/Ctrl-right, Home/End, and live suggestions.
+Ctrl-left/Ctrl-right, Ctrl-Backspace, Home/End, and live suggestions. Pressing
+Ctrl+C exits cleanly and restores the terminal.
 Searches run in the background, so pane focus, tabs, playback, seeking, and
 loop controls remain responsive while YouTube results load.
+
+The header reports `IDLE`, `SEARCHING`, `LOADING`, `PLAYING`, `PAUSED`,
+`STOPPED`, `NO RESULTS`, `SEARCH ERROR`, `NETWORK ERROR`, or `PLAYBACK ERROR`
+as appropriate. A network failure does not get reported as a generic terminal
+rendering error.
 
 ## Requirements
 
@@ -57,6 +68,10 @@ Install these before installing OpenTune:
 - [`mpv`](https://mpv.io/) — audio playback and YouTube streaming
 - [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) — YouTube search metadata
 - `ffmpeg` — required only for `Ctrl-d` audio downloads
+
+Windows also needs the `windows-curses` optional dependency; the included
+`install.ps1` installs it through pipx. `mpv`, `yt-dlp`, and `ffmpeg` must be
+available on `PATH`.
 
 Examples for common Linux distributions:
 
@@ -175,6 +190,21 @@ While the environment is active, `opentune` works normally. After `deactivate`, 
 
 Do not use `--break-system-packages`; it bypasses Arch's protection for the system Python and is unnecessary for OpenTune.
 
+### Windows PowerShell
+
+From a PowerShell prompt in the checkout, run:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\install.ps1
+opentune "Daft Punk Get Lucky"
+```
+
+The script checks for Python 3.10+, installs/updates pipx, installs the
+`windows-curses` extra, and uses `winget` for missing `mpv`, `yt-dlp`, and
+`ffmpeg` when available. If your environment manages those tools separately,
+run `.\install.ps1 -SkipDependencies` after placing them on `PATH`.
+
 ### Install from PyPI
 
 Installation and future upgrades from PyPI work from any directory:
@@ -184,11 +214,14 @@ pipx install opentune
 pipx upgrade opentune
 ```
 
-OpenTune v1.0.0 includes an installer hook for the short thank-you/support
+OpenTune v1.1.0 includes an installer hook for the short thank-you/support
 message (direct legacy installs and verbose pip builds show it; standard pip may
 hide build-hook output). On the first launch after a new release, the same
 message appears in a floating modal;
-press `Esc` to dismiss it. The notice is shown once per installed version.
+press `Esc` to dismiss it. The notice is shown once per installed version. A
+background GitHub release check may show a separate non-blocking update pane;
+use `opentune --update` or `pipx upgrade opentune` only when you choose to
+update.
 
 Maintainers can follow [the PyPI release guide](docs/PYPI_RELEASE.md) to configure Trusted Publishing and publish releases.
 
@@ -256,6 +289,8 @@ opentune --help
 | `Tab` | Move forward through **Suggestions**, **Results**, **Queue**, and **History** |
 | `Shift+Tab` | Move backward through the home tabs |
 | `Alt+1` … `Alt+4` | Jump to Suggestions, Results, Queue, or History |
+| `R` (Suggestions tab) | Refresh personalised recommendations and clear their dismissals |
+| `y` | Add/remove the selected song(s) from **Liked Songs** |
 | `/` | Open a search prompt from any window |
 | `f` (Queue tab) | Find and highlight a song in the Queue without filtering it |
 | `n` / `N` (Queue tab) | Jump to the next / previous match; status shows `[current/total]` |
@@ -264,7 +299,7 @@ opentune --help
 | `s` (Queue tab) | Shuffle only the temporary Queue; saved playlists are unchanged |
 | `v` | Enter/leave visual selection; extend the selection with `j`/`k` |
 | `d` | Download the highlighted result, queue item, suggestion, or playlist song |
-| `D` | Delete selected queue/playlist songs or a playlist after confirmation |
+| `D` | Delete selected Queue/Suggestions/playlist songs or a playlist after confirmation |
 | `c` | Clear the Queue after `y`/`n`/Enter confirmation |
 | `u` | Undo the last queue deletion or clear |
 | `Ctrl-r` | Redo the last undone queue deletion or clear |
@@ -276,6 +311,7 @@ opentune --help
 | `Ctrl-h` / `Ctrl-l` or `Ctrl-Left/Right` | Cycle focus between panes (wraps) |
 | `Ctrl-Left/Right` in search | Move the cursor by one word |
 | `Ctrl-Backspace` in search | Delete the previous word |
+| `Ctrl+C` | Stop playback, restore the terminal, and exit cleanly |
 | `?` | Open/close the in-player key reference |
 | `Esc` in a prompt or visual mode | Cancel the prompt or visual selection |
 | `Esc` twice in Queue | Clear the active Queue find query |
@@ -308,18 +344,20 @@ continues playback automatically. Quitting with `q` stops replenishment.
 
 ### Suggestions tab
 
-The Suggestions tab is the home tab. It never displays the listening-history
-rows themselves. After songs are played, OpenTune keeps only a small in-memory
-preference signal (recent artists and title tokens), asks YouTube for related
-music from several recent seeds, and excludes anything already in History.
-Nothing in this signal is written to disk, so it uses no persistent history
-storage and disappears when OpenTune closes.
+The Suggestions tab is the home tab and is separate from Queue. It loads the
+cached recommendation set immediately. Liked Songs is the primary source; if
+it is empty, persisted listening history is used as a temporary seed. New
+recommendations are generated from several seeds in the background and exclude
+Liked Songs, dismissed URLs, and duplicate uploads. Selecting a suggestion
+does not remove or regenerate the remaining rows. Press `D` to dismiss selected
+rows persistently, or `R` to clear dismissals and generate a fresh set.
 
 ### History tab
 
-The History tab shows this session's listening history, newest first. It is
-kept in memory only and is cleared when OpenTune closes. Saved playlists remain
-available across restarts and are separate from listening history.
+The History tab shows persisted listening history, newest first. It stores
+track metadata locally so later Suggestions can learn from previous listening.
+It is separate from saved playlists and can be removed by deleting the history
+file described in [local data storage](docs/DATA_STORAGE.md).
 
 Undo and redo are intentionally limited to queue deletion and queue clearing.
 Playback, search, pause, seeking, looping, and adding tracks are not recorded
@@ -332,7 +370,11 @@ terminal width. When open, `Ctrl-h`/`Ctrl-Left` cycles focus left and
 `Ctrl-l`/`Ctrl-Right` cycles focus right; focus wraps between the panes. The
 pane stays open after starting a playlist track.
 
-The pinned `Downloads` playlist has no user-playlist index. User-created
+The pinned `Downloads` and **Liked Songs** playlists are system playlists.
+Liked Songs is created automatically, cannot be renamed or deleted, and can be
+fully managed at the song level. Press `y` in a main tab to like/unlike a
+selection; opening Liked Songs exposes the same download, delete, queue, and
+playlist actions as other playlists. The pinned `Downloads` playlist has no user-playlist index. User-created
 playlists are numbered from `1` in the visible list and remain in creation
 order (with pinned user playlists grouped first). Playlist files are stored in:
 
@@ -357,8 +399,8 @@ Downloaded audio files are stored in:
 | `l` | Enter the focused playlist |
 | `a` | Create a playlist; an empty name becomes `My Playlist #N` |
 | `p` | Pin/unpin the focused playlist (Downloads is always pinned) |
-| `r` | Rename the focused playlist (`Downloads` cannot be renamed) |
-| `D` | Delete the focused playlist after confirmation (`Downloads` is protected) |
+| `r` | Rename the focused playlist (system playlists cannot be renamed) |
+| `D` | Delete the focused playlist after confirmation (system playlists are protected) |
 | `P` | Toggle the pane |
 | `Ctrl-h` / `Ctrl-l` or `Ctrl-Left/Right` | Cycle focus between panes |
 
@@ -473,9 +515,18 @@ opentune/
 
 ## Current scope and limitations
 
-OpenTune currently provides persistent playlists and optional downloads. Lyrics,
-volume controls, and system media-key integration remain outside the current
-scope.
+OpenTune currently provides persistent playlists, Liked Songs, cached
+recommendations, optional downloads, and best-effort terminal mouse/touch
+input. Terminal emulators differ in how they expose touchscreen events, so
+keyboard controls remain the supported fallback. The Termux MPV linker error
+(`CANNOT LINK EXECUTABLE ... __from_chars_floating_point...`) is a known,
+deferred compatibility issue; OpenTune does not modify MPV binaries or Android
+native libraries to work around it.
+
+See [TUI framework evaluation](docs/TUI_FRAMEWORK_EVALUATION.md),
+[local data storage](docs/DATA_STORAGE.md), and
+[known issues and platform notes](docs/KNOWN_ISSUES.md) for implementation
+status and data-retention details.
 
 ## License
 
